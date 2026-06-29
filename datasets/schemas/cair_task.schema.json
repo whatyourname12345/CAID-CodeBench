@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CAIR-CodeBench Task",
+  "type": "object",
+  "required": [
+    "task_id",
+    "source",
+    "repo",
+    "base_commit",
+    "dialogue_scenario_path",
+    "gold_intent_state_path",
+    "evaluation_spec_path"
+  ],
+  "properties": {
+    "task_id": {"type": "string"},
+    "source": {"type": "string"},
+    "repo": {"type": "string"},
+    "base_commit": {"type": "string"},
+    "dialogue_scenario_path": {"type": "string"},
+    "gold_intent_state_path": {"type": "string"},
+    "evaluation_spec_path": {"type": "string"},
+    "initial_user_query": {"type": "string"},
+    "hidden_fields": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

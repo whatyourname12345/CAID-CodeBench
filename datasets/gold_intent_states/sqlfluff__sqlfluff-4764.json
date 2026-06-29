@@ -1,0 +1,46 @@
+{
+  "task_id": "sqlfluff__sqlfluff-4764",
+  "issue_type": "feature",
+  "symptom": "Enable quiet mode/no-verbose in CLI for use in pre-commit hook",
+  "expected_behavior": "Enable quiet mode/no-verbose in CLI for use in pre-commit hook",
+  "observed_behavior": "Enable quiet mode/no-verbose in CLI for use in pre-commit hook",
+  "reproduction": "",
+  "constraints": [
+    "The fix must resolve all FAIL_TO_PASS tests.",
+    "The fix must not regress PASS_TO_PASS tests.",
+    "The agent should not modify tests to hide the failure.",
+    "Evaluation tests are applied after the model patch."
+  ],
+  "non_goals": [
+    "Do not apply the gold patch directly during evaluation.",
+    "Do not rely on the hidden test patch as agent-visible context."
+  ],
+  "relevant_files": [
+    "src/sqlfluff/cli/commands.py",
+    "src/sqlfluff/cli/formatters.py",
+    "src/sqlfluff/core/linter/linted_dir.py"
+  ],
+  "success_tests": [
+    "test/cli/commands_test.py::test__cli__fix_multiple_errors_quiet_force",
+    "test/cli/commands_test.py::test__cli__fix_multiple_errors_quiet_no_force"
+  ],
+  "misleading_traps": [
+    "The initial user request is intentionally incomplete.",
+    "User guesses may be incorrect and should be verified against code and tests."
+  ],
+  "evidence": {
+    "gold_patch_files": [
+      "src/sqlfluff/cli/commands.py",
+      "src/sqlfluff/cli/formatters.py",
+      "src/sqlfluff/core/linter/linted_dir.py"
+    ],
+    "test_patch_files": [
+      "test/cli/commands_test.py"
+    ],
+    "fail_to_pass": [
+      "test/cli/commands_test.py::test__cli__fix_multiple_errors_quiet_force",
+      "test/cli/commands_test.py::test__cli__fix_multiple_errors_quiet_no_force"
+    ],
+    "pass_to_pass_count": 131
+  }
+}

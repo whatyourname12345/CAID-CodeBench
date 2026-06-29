@@ -1,0 +1,25 @@
+.cache/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Large local datasets and external reference repositories.
+datasets/swe-bench/
+SWE-bench/
+SWE-Explore-Bench/
+lost_in_conversation/
+
+# Local run outputs.
+results/raw_traces/*
+results/patches/*
+results/test_logs/*
+results/scores/*
+!results/raw_traces/.gitkeep
+!results/patches/.gitkeep
+!results/test_logs/.gitkeep
+!results/scores/.gitkeep
+
+# Papers and extracted analysis text are local research references.
+docs/*.pdf
+docs/extracted/

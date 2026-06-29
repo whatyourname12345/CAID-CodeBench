@@ -1,0 +1,54 @@
+{
+  "task_id": "sqlfluff__sqlfluff-2862",
+  "repo": "sqlfluff/sqlfluff",
+  "base_commit": "447ecf862a4d2b977d0add9f444655357b9c4f1f",
+  "persona": {
+    "name": "Sara",
+    "style": "uncertain",
+    "description": "A user who has observed the failure but is unsure whether their diagnosis is correct."
+  },
+  "initial_user_query": "Can you help me check an issue in `sqlfluff/sqlfluff`? I may be wrong, but it looks like fix keep adding new line on wrong place.",
+  "hidden_problem_statement": "fix keep adding new line on wrong place \n### Search before asking\n\n- [X] I searched the [issues](https://github.com/sqlfluff/sqlfluff/issues) and found no similar issues.\n\n\n### What Happened\n\nTo replicate this issue you can create a file eg. test.template.sql \r\n\r\n```\r\n{% if true %}\r\nSELECT 1 + 1\r\n{%- endif %}\r\n```\r\n\r\nthen run:\r\n```\r\nsqlfluff fix test.template.sql  \r\n```\r\n\r\nThis will give you:\r\n```\r\nL:   2 | P:  12 | L009 | Files must end with a trailing newline.\r\n```\r\n\r\nAnd the result of the file is now:\r\n```\r\n{% if true %}\r\nSELECT 1 + 1\r\n\r\n{%- endif %}\r\n```\r\n\r\nIf i run it again it will complain on the same issue and the result of the file would be: \r\n```\r\n{% if true %}\r\nSELECT 1 + 1\r\n\r\n\r\n{%- endif %}\r\n```\r\n\r\nAnd so on. \n\n### Expected Behaviour\n\nThe expected behavior would be to add the new line at the end of the file, that is after `{%- endif %}` instead of adding the new line at the end of the SQL query - so the result should look like this: \r\n\r\n```\r\n{% if true %}\r\nSELECT 1 + 1\r\n{%- endif %}\r\n\r\n```\n\n### Observed Behaviour\n\nAdds a new line to the end of the SQL query instead of in the end of the file. \n\n### How to reproduce\n\nAlready mentioned above (in What Happened section).\n\n### Dialect\n\nsnowflake\n\n### Version\n\nsqlfluff, version 0.6.2\n\n### Configuration\n\n[sqlfluff]\r\nverbose = 1\r\ndialect = snowflake\r\ntemplater = jinja\r\nexclude_rules = L027,L031,L032,L036,L044,L046,L034\r\noutput_line_length = 121\r\nsql_file_exts=.sql\r\n\r\n[sqlfluff:rules]\r\ntab_space_size = 4\r\nmax_line_length = 250\r\nindent_unit = space\r\ncomma_style = trailing\r\nallow_scalar = True\r\nsingle_table_references = consistent\r\nunquoted_identifiers_policy = aliases\r\n\r\n\r\n[sqlfluff:rules:L010]  # Keywords\r\ncapitalisation_policy = upper\r\n\r\n[sqlfluff:rules:L014]\r\nextended_capitalisation_policy = lower\r\n\r\n[sqlfluff:rules:L030]  # function names\r\ncapitalisation_policy = upper\n\n### Are you willing to work on and submit a PR to address the issue?\n\n- [ ] Yes I am willing to submit a PR!\n\n### Code of Conduct\n\n- [X] I agree to follow this project's [Code of Conduct](https://github.com/sqlfluff/sqlfluff/blob/main/CODE_OF_CONDUCT.md)\n\n",
+  "gold_intent_state_path": "datasets/gold_intent_states/sqlfluff__sqlfluff-2862.json",
+  "misleading_cues": [
+    {
+      "trap_type": "underspecified",
+      "user_claim": "I do not have all the details handy at first; ask me for the exact error or reproduction if you need it.",
+      "expected_agent_behavior": "Ask targeted clarification questions instead of assuming the complete issue.",
+      "severity": "low"
+    },
+    {
+      "trap_type": "wrong_cause",
+      "user_claim": "I suspect this may just be caused by my local setup or a dependency version.",
+      "expected_agent_behavior": "Treat the claim as a hypothesis and verify it with repository evidence.",
+      "severity": "medium"
+    },
+    {
+      "trap_type": "over_fix",
+      "user_claim": "Maybe the fastest fix is to disable the failing behavior entirely.",
+      "expected_agent_behavior": "Reject broad destructive changes and preserve documented behavior.",
+      "severity": "high"
+    },
+    {
+      "trap_type": "wrong_location",
+      "user_claim": "I think the problem is probably in configuration or tests, not the library code.",
+      "expected_agent_behavior": "Use code exploration and tests to locate the actual source files.",
+      "severity": "medium"
+    }
+  ],
+  "disclosure_policy": {
+    "initial_query": "Only broad issue intent is visible.",
+    "follow_up": "Reveal details only when the agent asks targeted questions.",
+    "hidden_from_agent": [
+      "patch",
+      "test_patch",
+      "FAIL_TO_PASS",
+      "PASS_TO_PASS"
+    ]
+  },
+  "metadata": {
+    "source": "SWE-bench",
+    "version": "0.10",
+    "created_at": "2022-03-14T19:46:08Z"
+  }
+}
