@@ -12,7 +12,7 @@ from typing import Any
 from cair_v2.batch.batch_config import BatchConfig
 from cair_v2.batch.batch_runner import write_manual_review_queue
 from cair_v2.batch.batch_state import BatchState
-from cair_v2.batch.candidate_loader import load_candidate_rows
+from cair_v2.batch.candidate_loader import load_candidate_rows, select_candidates
 from cair_v2.batch.quality_gate_v2 import evaluate_v2_instance_dir, evaluate_v2_quality
 from cair_v2.construction.build_instance_skeleton import patch_metadata_from_candidate, source_record_from_candidate
 from cair_v2.construction.cair_compiler_v2 import build_cair_instance_v2, write_intermediate_debug, write_v2_outputs
@@ -64,10 +64,27 @@ def append_retry_log(instance_dir: Path, entry: dict[str, Any]) -> None:
         handle.write(json.dumps({"created_at": timestamp(), **entry}, ensure_ascii=False) + "\n")
 
 
-def select_rows_for_v2(input_file: Path, *, limit: int | None, include_rejected: bool) -> list[dict[str, Any]]:
+def select_rows_for_v2(
+    input_file: Path,
+    *,
+    limit: int | None,
+    include_rejected: bool,
+    config: BatchConfig,
+) -> list[dict[str, Any]]:
+    selection = config.candidate_selection
+    include_rejected = include_rejected or selection.include_rejected
+    if not selection.preserve_input_order:
+        return select_candidates(
+            input_file,
+            limit=limit,
+            include_rejected=include_rejected,
+            golden_ids=selection.golden_instance_ids,
+            golden_first=selection.golden_first,
+        )
     rows = load_candidate_rows(input_file)
-    if not include_rejected:
-        rows = [row for row in rows if str(row.get("manual_override_label") or "") != "REJECT_OR_DOWNRANK"]
+    skip_labels = set(selection.skip_manual_labels)
+    if not include_rejected and skip_labels:
+        rows = [row for row in rows if str(row.get("manual_override_label") or "") not in skip_labels]
     return rows[:limit] if limit is not None else rows
 
 
@@ -246,6 +263,7 @@ def run_one_instance_v2(
             _count_api_call(state, instance_id, result.api_call_made, options)
             if result.ok:
                 semantic = result
+                state.update_instance(instance_id, semantic_capsule="pass")
                 append_retry_log(instance_dir, {"step": "semantic_capsule", "event": "ok", "label": label, "warnings": result.warnings})
                 if label.endswith("_pro"):
                     state.add_escalation(instance_id, "semantic_capsule", options.model_generator, model, "Flash semantic capsule failed; retried with Pro")
@@ -273,6 +291,7 @@ def run_one_instance_v2(
             instance_id,
             status="manual_review_required",
             current_step="semantic_capsule",
+            semantic_capsule="fail",
             last_error="; ".join(semantic.errors if semantic else ["max_api_calls_reached"]),
             failure_reason="semantic_capsule_quality_failed",
         )
@@ -311,6 +330,7 @@ def run_one_instance_v2(
         _count_api_call(state, instance_id, result.api_call_made, options)
         if result.ok:
             plan_result = result
+            state.update_instance(instance_id, dialogue_plan="pass")
             append_retry_log(instance_dir, {"step": "dialogue_plan", "model": model, "event": "ok", "label": label, "warnings": result.warnings})
             break
         if result.status == "manual_review_required":
@@ -325,6 +345,7 @@ def run_one_instance_v2(
                 instance_id,
                 status="manual_review_required",
                 current_step="dialogue_plan",
+                dialogue_plan="manual_review_required",
                 last_error="; ".join(plan_result.errors),
                 failure_reason="no_supported_revision_fact",
                 suggested_fix="Inspect .build/semantic_capsule.json revision_support; do not force a CAIR revision without issue evidence.",
@@ -344,6 +365,7 @@ def run_one_instance_v2(
                 instance_id,
                 status="manual_review_required",
                 current_step="dialogue_plan",
+                dialogue_plan="manual_review_required",
                 last_error="semantic_capsule has no supported revision fact; template fallback skipped",
                 failure_reason="no_supported_revision_fact",
                 suggested_fix="Manual review can decide whether this issue should be used as underspecification-only or excluded from CAIR revision seeds.",
@@ -362,11 +384,14 @@ def run_one_instance_v2(
             instance_id,
             status=status,
             current_step="dialogue_template" if plan_result.source == "template" else "dialogue_plan",
+            dialogue_plan="fail",
             last_error="; ".join(plan_result.errors),
             failure_reason="template_dialogue_needs_revision_fact" if plan_result.source == "template" else "dialogue_plan_and_template_failed",
         )
         state.save()
         return
+    if plan_result.source == "template":
+        state.update_instance(instance_id, dialogue_plan="template")
 
     status = finalize_v2(
         instance_dir=instance_dir,
@@ -395,7 +420,12 @@ def run_batch_v2(options: BatchV2Options, config: BatchConfig) -> BatchState:
         model_reviewer=options.model_reviewer,
     )
     state.data["pipeline_version"] = "v2_minimal_robust"
-    rows = select_rows_for_v2(options.input_file, limit=options.limit, include_rejected=options.include_rejected)
+    rows = select_rows_for_v2(
+        options.input_file,
+        limit=options.limit,
+        include_rejected=options.include_rejected,
+        config=config,
+    )
     for record in rows:
         if state.api_calls >= options.max_api_calls and not (options.dry_run or options.no_api):
             break

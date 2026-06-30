@@ -23,13 +23,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "configs/batch_default.yaml")
-    parser.add_argument("--model-generator", default="deepseek-v4-flash")
-    parser.add_argument("--model-critical", default="deepseek-v4-pro")
-    parser.add_argument("--model-reviewer", default="deepseek-v4-pro")
-    parser.add_argument("--limit", type=int, default=1)
-    parser.add_argument("--max-api-calls", type=int, default=30)
-    parser.add_argument("--client-max-retries", type=int, default=1)
-    parser.add_argument("--client-timeout", type=int, default=90)
+    parser.add_argument("--model-generator", default=None)
+    parser.add_argument("--model-critical", default=None)
+    parser.add_argument("--model-reviewer", default=None)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--max-api-calls", type=int, default=None)
+    parser.add_argument("--client-max-retries", type=int, default=None)
+    parser.add_argument("--client-timeout", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-api", action="store_true")
     parser.add_argument("--resume", action="store_true")
@@ -42,16 +42,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_batch_config(resolve(args.config))
+    models = config.model_config.models
     options = BatchV2Options(
         input_file=resolve(args.input),
         output_dir=resolve(args.output_dir),
-        model_generator=args.model_generator,
-        model_critical=args.model_critical,
-        model_reviewer=args.model_reviewer,
-        limit=args.limit,
-        max_api_calls=args.max_api_calls,
-        client_max_retries=args.client_max_retries,
-        client_timeout=args.client_timeout,
+        model_generator=args.model_generator or models.get("flash", "deepseek-v4-flash"),
+        model_critical=args.model_critical or models.get("pro", "deepseek-v4-pro"),
+        model_reviewer=args.model_reviewer or models.get("pro", "deepseek-v4-pro"),
+        limit=args.limit if args.limit is not None else config.defaults.limit,
+        max_api_calls=args.max_api_calls if args.max_api_calls is not None else config.defaults.max_api_calls,
+        client_max_retries=args.client_max_retries if args.client_max_retries is not None else config.defaults.client_max_retries,
+        client_timeout=args.client_timeout if args.client_timeout is not None else config.defaults.client_timeout,
         dry_run=args.dry_run,
         no_api=args.no_api,
         resume=args.resume,

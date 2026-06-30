@@ -1,10 +1,20 @@
 .cache/
 .venv/
+.DS_Store
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.parquet
+*.arrow
+.build/
+raw_llm_outputs/
 
 # Large local datasets and external reference repositories.
+data/raw/
+data/processed/
+data/candidates/
+data/cair_instances/
+data/releases/
 datasets/swe-bench/
 SWE-bench/
 SWE-Explore-Bench/
@@ -23,3 +33,4 @@ results/scores/*
 # Papers and extracted analysis text are local research references.
 docs/*.pdf
 docs/extracted/
+.env

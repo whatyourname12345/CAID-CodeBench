@@ -50,6 +50,17 @@ uses:
 5. localization checkpoint gold extraction,
 6. agent/evaluator-view export.
 
+The default configuration is kept in:
+
+- `configs/model_config.yaml`: v2 model routing only.
+- `configs/batch_default.yaml`: conservative smoke defaults, candidate
+  selection behavior, quality-gate policy, and release defaults.
+
+The default candidate-selection policy preserves the input CSV order. Use a
+domain-diverse input such as `data/candidates/diverse_seed_candidates.csv` for
+batch construction. `django__django-14011` remains a golden construction
+example, not a default first sample for benchmark distribution.
+
 Set the DeepSeek key only in the environment:
 
 ```bash

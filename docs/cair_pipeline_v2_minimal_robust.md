@@ -140,6 +140,43 @@ README.md
 
 Only `cair_instance.json` and `quality_report.json` are intended as stable construction/scoring interfaces. `.build/` is debug-only.
 
+The formal compact instance uses sparse fields. Empty state-delta arrays,
+empty forbidden-file/conflict lists, raw risk notes, raw model outputs, and
+candidate-private patch records stay out of `cair_instance.json`. Construction
+debug data belongs under `.build/` and is not part of the release contract.
+
+## Configuration
+
+v2 uses two small config files:
+
+```text
+configs/model_config.yaml
+configs/batch_default.yaml
+```
+
+`model_config.yaml` describes only the v2 minimal-robust chain:
+
+```text
+semantic_capsule -> dialogue_plan -> local compiler -> local quality gate
+```
+
+It intentionally does not contain v1 steps such as `atomic_issue_units`,
+`hidden_intent_state`, `operation_trajectory`, standalone `qa_checklist`, or
+standalone `intent_oracle` generation.
+
+`batch_default.yaml` keeps smoke-test defaults conservative:
+
+- `limit: 1`
+- `max_api_calls: 30`
+- input-order preservation for curated diverse seed CSVs
+- rejected/downranked candidate filtering
+- no reviewer by default
+- agent-view release defaults
+
+Command-line flags override these defaults. If `preserve_input_order` is true,
+the runner trusts the input CSV order. Turn it off only when running from an
+unsorted candidate pool and you want local quality-score ordering.
+
 ## Sanitizer First
 
 `cair_v2/construction/sanitizer.py` runs before compilation and again over the compact instance. It scrubs or blocks:
@@ -179,6 +216,11 @@ v2 preserves the localization checkpoint introduced in v1:
 ```
 
 The prompt is for the agent before code editing. It never contains gold files/functions. Gold is evaluator-only and extracted locally from reference patch metadata.
+
+Gold extraction first uses the private construction record in `.build/` when
+available. If the full patch is absent, it falls back to v2 patch metadata under
+`.build/patch_metadata.json`, then to legacy root `patch_metadata.json` only for
+compatibility with older instance directories.
 
 ## Agent View vs Evaluator View
 

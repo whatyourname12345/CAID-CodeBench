@@ -169,7 +169,13 @@ def extract_localization_gold(instance_dir: Path, candidate_csv: Path = DEFAULT_
         if gold.files:
             return gold
     metadata_path = instance_dir / "patch_metadata.json"
-    metadata = read_json(metadata_path) if metadata_path.exists() else {}
+    build_metadata_path = instance_dir / ".build" / "patch_metadata.json"
+    if metadata_path.exists():
+        metadata = read_json(metadata_path)
+    elif build_metadata_path.exists():
+        metadata = read_json(build_metadata_path)
+    else:
+        metadata = {}
     gold = extract_gold_from_patch_metadata(metadata, repo=repo)
     if not gold.files:
         gold.warnings.append("No source file gold could be extracted for localization checkpoint.")

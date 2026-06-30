@@ -3,24 +3,42 @@ models:
   pro: deepseek-v4-pro
 
 routing:
-  patch_summary: flash
-  atomic_issue_units: flash
-  final_intent: pro
-  hidden_intent_state: pro
-  trajectory_plan: pro
-  operation_trajectory: pro
-  user_utterance_realization: flash
-  evaluation_modes: flash
-  intent_oracle: pro
-  qa_checklist: flash
-  equivalence_verification: pro
-  leakage_check: pro
-  cair_instance_reviewer: pro
-  quality_gate_diagnosis: pro
-  retry_decision: pro
+  semantic_capsule:
+    primary: flash
+    fallback: pro
+  dialogue_plan:
+    primary: pro
+    fallback: flash
+  dialogue_template:
+    primary: local
+  deterministic_compiler:
+    primary: local
+  sanitizer:
+    primary: local
+  localization_gold:
+    primary: local
+  quality_gate:
+    primary: local
+  export:
+    primary: local
+
+optional_reviewer:
+  enabled_by_default: false
+  model: pro
+
+llm_params:
+  semantic_capsule:
+    temperature: 0.0
+    max_tokens: 5000
+    timeout: 90
+  dialogue_plan:
+    temperature: 0.0
+    max_tokens: 1400
+    timeout: 90
 
 escalation:
   enabled: true
-  flash_to_pro_on_quality_warning: true
+  semantic_capsule_flash_to_pro: true
+  dialogue_plan_pro_to_flash_on_empty_or_parse_failure: true
   flash_to_pro_on_parse_failure: false
-  max_escalations_per_instance: 4
+  max_escalations_per_instance: 2
