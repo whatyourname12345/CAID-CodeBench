@@ -1,0 +1,24 @@
+defaults:
+  limit: 1
+  max_api_calls: 30
+  max_attempts_per_step: 3
+  max_instance_attempts: 2
+  sleep_between_instances: 0.0
+
+candidate_selection:
+  golden_first: true
+  golden_instance_ids:
+    - django__django-14011
+  include_rejected: false
+  skip_manual_labels:
+    - REJECT_OR_DOWNRANK
+
+quality_gate:
+  require_backtest_pass: true
+  require_strict_validation: true
+  require_reviewer_pass: true
+  allow_qa_todo_for_human_fields: true
+
+release:
+  default_name: cair_batch_v0
+  include_patch_by_default: false

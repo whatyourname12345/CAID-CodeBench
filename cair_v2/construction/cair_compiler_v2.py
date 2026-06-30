@@ -1,0 +1,356 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from cair_v2.construction.domains import domain_for_repo
+from cair_v2.construction.instance_io import read_json, write_json
+from cair_v2.construction.localization_checkpoint import build_localization_checkpoint
+from cair_v2.construction.localization_gold import LocalizationGold, extract_localization_gold
+from cair_v2.construction.sanitizer import SanitizerResult, sanitize_compact_instance
+
+
+REVISION_OPERATIONS = {
+    "correct",
+    "reverse",
+    "retract",
+    "override",
+    "obsolete",
+    "discard",
+    "introduce_conflict",
+    "resolve_conflict",
+    "reject",
+}
+
+ACTIVE_UNIT_TYPES = {
+    "symptom",
+    "observed_behavior",
+    "expected_behavior",
+    "reproduction",
+    "error_message",
+    "affected_component",
+    "active_constraint",
+    "negative_constraint",
+    "regression_expectation",
+    "boundary_case",
+    "acceptance_signal",
+    "ambiguity_or_correction",
+    "conflict_or_tension",
+}
+
+OBSOLETE_UNIT_TYPES = {"obsolete_candidate", "rejected_solution", "non_goal", "design_suggestion_non_goal", "workaround_to_reject"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _str_list(value: Any) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in _list(value):
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _sparse_delta(delta: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {key: values for key, values in delta.items() if isinstance(values, list) and values}
+
+
+def _unit_map(capsule: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    units = capsule.get("fact_units") if isinstance(capsule.get("fact_units"), list) else []
+    return {str(unit.get("unit_id")): unit for unit in units if isinstance(unit, dict) and unit.get("unit_id")}
+
+
+def _introduced_units(turn: dict[str, Any], units_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for unit_id in _str_list(turn.get("introduced_units")):
+        unit = units_by_id.get(unit_id)
+        if unit:
+            result.append(unit)
+    return result
+
+
+def _unit_texts(units: list[dict[str, Any]], allowed_types: set[str] | None = None) -> list[str]:
+    values: list[str] = []
+    for unit in units:
+        if unit.get("expose_to_user") is False or unit.get("type") == "implementation_hint":
+            continue
+        if allowed_types and unit.get("type") not in allowed_types:
+            continue
+        text = str(unit.get("text") or "").strip()
+        if text:
+            values.append(text)
+    return _str_list(values)
+
+
+def compile_state_delta(turn: dict[str, Any], introduced: list[dict[str, Any]], final_intent: dict[str, Any]) -> dict[str, list[str]]:
+    operation = str(turn.get("operation") or "")
+    intent_delta = str(turn.get("intent_delta") or "").strip()
+    delta: dict[str, list[str]] = {
+        "add_active_goals": [],
+        "add_constraints": [],
+        "add_obsolete_goals": [],
+        "add_forbidden_actions": [],
+        "resolve_conflicts": [],
+    }
+    if operation in REVISION_OPERATIONS:
+        obsolete = _unit_texts(introduced, OBSOLETE_UNIT_TYPES)
+        constraints = _unit_texts(introduced, {"negative_constraint", "regression_expectation", "conflict_or_tension", "ambiguity_or_correction"})
+        if obsolete:
+            delta["add_obsolete_goals"] = obsolete
+        if constraints:
+            delta["add_constraints"] = constraints
+        if not obsolete and not constraints and intent_delta:
+            delta["add_obsolete_goals"] = [intent_delta]
+    elif operation in {"add_regression_constraint", "add_negative_constraint", "override"}:
+        delta["add_constraints"] = _unit_texts(
+            introduced,
+            {"regression_expectation", "negative_constraint", "active_constraint", "boundary_case"},
+        ) or ([intent_delta] if intent_delta else [])
+    elif operation == "resolve_conflict":
+        delta["resolve_conflicts"] = [intent_delta] if intent_delta else []
+    elif operation == "confirm":
+        # Keep confirm turns light. Only add the final objective if no explicit unit was introduced.
+        active = _unit_texts(introduced, {"expected_behavior", "acceptance_signal"})
+        delta["add_active_goals"] = active[:2]
+    else:
+        delta["add_active_goals"] = _unit_texts(introduced, ACTIVE_UNIT_TYPES) or ([intent_delta] if intent_delta else [])
+    if operation == "confirm" and not any(delta.values()):
+        objective = str(final_intent.get("objective") or "").strip()
+        if objective:
+            delta["add_active_goals"] = [objective]
+    return _sparse_delta(delta)
+
+
+def compile_dialogue_turns(capsule: dict[str, Any], dialogue_plan: dict[str, Any]) -> list[dict[str, Any]]:
+    units_by_id = _unit_map(capsule)
+    final_intent = capsule.get("final_intent") if isinstance(capsule.get("final_intent"), dict) else {}
+    turns = dialogue_plan.get("turns") if isinstance(dialogue_plan.get("turns"), list) else []
+    compiled: list[dict[str, Any]] = []
+    for index, raw in enumerate(turns, start=1):
+        if not isinstance(raw, dict):
+            continue
+        introduced = _introduced_units(raw, units_by_id)
+        turn = {
+            "turn_id": f"T{index}",
+            "operation": str(raw.get("operation") or ""),
+            "user_utterance": str(raw.get("user_utterance") or "").strip(),
+            "state_delta": compile_state_delta(raw, introduced, final_intent),
+        }
+        compiled.append(turn)
+    return compiled
+
+
+def build_final_issue_prompt(final_intent: dict[str, Any]) -> str:
+    lines = [
+        "Please implement the following final active issue intent.",
+        "",
+        f"Objective: {final_intent.get('objective', '')}",
+    ]
+    must = _str_list(final_intent.get("must_satisfy"))
+    if must:
+        lines.extend(["", "Must satisfy:"])
+        lines.extend(f"- {item}" for item in must)
+    regressions = _str_list(final_intent.get("regression_expectations"))
+    if regressions:
+        lines.extend(["", "Preserve:"])
+        lines.extend(f"- {item}" for item in regressions)
+    return "\n".join(lines).strip()
+
+
+def build_concat_dialogue_prompt(turns: list[dict[str, Any]], final_intent: dict[str, Any]) -> str:
+    lines = [
+        "The user provided these messages over time. Infer only the final active intent.",
+        "Rejected, obsolete, or non-goal information is inactive and must not be implemented as a requirement.",
+        "",
+    ]
+    for turn in turns:
+        lines.append(f"{turn.get('turn_id')}: {turn.get('user_utterance')}")
+    inactive = _str_list(final_intent.get("must_not_satisfy")) + _str_list(final_intent.get("non_goals"))
+    if inactive:
+        lines.extend(["", "Inactive or rejected context:"])
+        lines.extend(f"- {item}" for item in inactive)
+    return "\n".join(lines).strip()
+
+
+def build_recap_prompt(final_intent: dict[str, Any]) -> str:
+    lines = [
+        "Before implementing, recap the final active intent and separate inactive context.",
+        "",
+        "Active objective:",
+        str(final_intent.get("objective") or ""),
+    ]
+    if final_intent.get("must_satisfy"):
+        lines.extend(["", "Must satisfy:"])
+        lines.extend(f"- {item}" for item in _str_list(final_intent.get("must_satisfy")))
+    inactive = _str_list(final_intent.get("must_not_satisfy")) + _str_list(final_intent.get("non_goals"))
+    if inactive:
+        lines.extend(["", "Inactive or rejected:"])
+        lines.extend(f"- {item}" for item in inactive)
+    return "\n".join(lines).strip()
+
+
+def build_oracle_prompt(final_intent: dict[str, Any], oracle: dict[str, Any]) -> str:
+    must = _str_list(oracle.get("must_satisfy")) or _str_list(final_intent.get("must_satisfy"))
+    must_not = _str_list(oracle.get("must_not_satisfy")) or _str_list(final_intent.get("must_not_satisfy"))
+    lines = [
+        "Judge whether a proposed patch satisfies the final active CAIR intent.",
+        "",
+        f"Final active intent: {final_intent.get('objective', '')}",
+        "",
+        "Must satisfy:",
+        *[f"- {item}" for item in must],
+    ]
+    if must_not:
+        lines.extend(["", "Must not satisfy / must not keep active:"])
+        lines.extend(f"- {item}" for item in must_not)
+    return "\n".join(lines).strip()
+
+
+def normalize_final_intent(capsule: dict[str, Any]) -> dict[str, Any]:
+    raw = capsule.get("final_intent") if isinstance(capsule.get("final_intent"), dict) else {}
+    return {
+        "objective": str(raw.get("objective") or "").strip(),
+        "must_satisfy": _str_list(raw.get("must_satisfy")),
+        "must_not_satisfy": _str_list(raw.get("must_not_satisfy")),
+        "non_goals": _str_list(raw.get("non_goals")),
+        "regression_expectations": _str_list(raw.get("regression_expectations")),
+    }
+
+
+def normalize_oracle(capsule: dict[str, Any], final_intent: dict[str, Any]) -> dict[str, Any]:
+    raw = capsule.get("oracle") if isinstance(capsule.get("oracle"), dict) else {}
+    return {
+        "must_satisfy": _str_list(raw.get("must_satisfy")) or _str_list(final_intent.get("must_satisfy")),
+        "must_not_satisfy": _str_list(raw.get("must_not_satisfy")) or _str_list(final_intent.get("must_not_satisfy")),
+        "obsolete_intent_checks": _str_list(raw.get("obsolete_intent_checks")) or _str_list(final_intent.get("non_goals")),
+        "regression_checks": _str_list(raw.get("regression_checks")) or _str_list(final_intent.get("regression_expectations")),
+        "forbidden_checks": _str_list(raw.get("forbidden_checks")),
+        "clarification_checks": _str_list(raw.get("clarification_checks")),
+    }
+
+
+def build_evaluation_modes(turns: list[dict[str, Any]], final_intent: dict[str, Any], oracle: dict[str, Any], localization_prompt: str) -> dict[str, Any]:
+    return {
+        "final_issue_prompt": build_final_issue_prompt(final_intent),
+        "concat_dialogue_prompt": build_concat_dialogue_prompt(turns, final_intent),
+        "multi_turn_cair_script": [
+            {"turn_id": turn.get("turn_id"), "user_utterance": turn.get("user_utterance")}
+            for turn in turns
+        ],
+        "recap_cair_prompt": build_recap_prompt(final_intent),
+        "oracle_intent_prompt": build_oracle_prompt(final_intent, oracle),
+        "localization_prompt": localization_prompt,
+    }
+
+
+def write_intermediate_debug(instance_dir: Path, updates: dict[str, Any]) -> None:
+    build_dir = instance_dir / ".build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    path = build_dir / "intermediate_debug.json"
+    current: dict[str, Any] = {}
+    if path.exists():
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            current = {}
+    current.update(updates)
+    path.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def build_cair_instance_v2(
+    instance_dir: Path,
+    *,
+    semantic_capsule: dict[str, Any],
+    dialogue_plan: dict[str, Any],
+    generator_model: str,
+    critical_model: str,
+    reviewer_model: str,
+    construction_status: str,
+    quality_gate_passed: bool,
+    dialogue_source: str,
+    localization_gold: LocalizationGold | None = None,
+) -> dict[str, Any]:
+    source_record = read_json(instance_dir / "source_record.json")
+    final_intent = normalize_final_intent(semantic_capsule)
+    oracle = normalize_oracle(semantic_capsule, final_intent)
+    turns = compile_dialogue_turns(semantic_capsule, dialogue_plan)
+    localization_gold = localization_gold or extract_localization_gold(instance_dir)
+    localization_checkpoint = build_localization_checkpoint(localization_gold)
+    evaluation_modes = build_evaluation_modes(turns, final_intent, oracle, localization_checkpoint["prompt"])
+    compact = {
+        "instance_id": source_record.get("instance_id"),
+        "repo": source_record.get("repo"),
+        "domain": domain_for_repo(str(source_record.get("repo") or "")),
+        "source_name": source_record.get("source_name"),
+        "base_commit": source_record.get("base_commit"),
+        "final_intent": final_intent,
+        "dialogue": {
+            "turns": turns,
+        },
+        "evaluation_modes": evaluation_modes,
+        "localization_checkpoint": localization_checkpoint,
+        "oracle": oracle,
+        "metadata": {
+            "pipeline_version": "v2_minimal_robust",
+            "generator_model": generator_model,
+            "critical_model": critical_model,
+            "reviewer_model": reviewer_model,
+            "dialogue_source": dialogue_source,
+            "construction_status": construction_status,
+            "quality_gate_passed": quality_gate_passed,
+            "golden_instance": source_record.get("instance_id") == "django__django-14011",
+            "created_at": utc_now(),
+        },
+    }
+    sanitized: SanitizerResult = sanitize_compact_instance(compact)
+    result = sanitized.data if isinstance(sanitized.data, dict) else compact
+    write_intermediate_debug(
+        instance_dir,
+        {
+            "semantic_capsule": semantic_capsule,
+            "dialogue_plan": dialogue_plan,
+            "compiled_dialogue_turns": turns,
+            "localization_gold_warnings": localization_gold.warnings,
+            "localization_gold_source": localization_gold.source,
+            "compiler_sanitizer_warnings": sanitized.warnings,
+            "compiler_sanitizer_hard_failures": sanitized.hard_failures,
+        },
+    )
+    return result
+
+
+def write_v2_outputs(instance_dir: Path, compact: dict[str, Any], quality_report: dict[str, Any]) -> None:
+    write_json(instance_dir / "cair_instance.json", compact)
+    write_json(instance_dir / "quality_report.json", quality_report)
+    readme = f"""# {compact.get('instance_id')}
+
+This is a CAIR pipeline v2 minimal-robust compact instance.
+
+Formal files:
+
+- `source_record.json`: source SWE-bench issue metadata for construction traceability.
+- `cair_instance.json`: compact benchmark instance consumed by downstream evaluators.
+- `quality_report.json`: local construction-time quality gate result.
+- `.build/`: debug-only semantic capsule, dialogue plan, raw LLM outputs, and retry logs.
+
+Construction status: `{compact.get('metadata', {}).get('construction_status')}`
+
+Dialogue source: `{compact.get('metadata', {}).get('dialogue_source')}`
+"""
+    (instance_dir / "README.md").write_text(readme, encoding="utf-8")

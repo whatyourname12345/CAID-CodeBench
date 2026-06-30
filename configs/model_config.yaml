@@ -1,0 +1,26 @@
+models:
+  flash: deepseek-v4-flash
+  pro: deepseek-v4-pro
+
+routing:
+  patch_summary: flash
+  atomic_issue_units: flash
+  final_intent: pro
+  hidden_intent_state: pro
+  trajectory_plan: pro
+  operation_trajectory: pro
+  user_utterance_realization: flash
+  evaluation_modes: flash
+  intent_oracle: pro
+  qa_checklist: flash
+  equivalence_verification: pro
+  leakage_check: pro
+  cair_instance_reviewer: pro
+  quality_gate_diagnosis: pro
+  retry_decision: pro
+
+escalation:
+  enabled: true
+  flash_to_pro_on_quality_warning: true
+  flash_to_pro_on_parse_failure: false
+  max_escalations_per_instance: 4

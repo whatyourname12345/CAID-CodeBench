@@ -32,3 +32,60 @@ Diagnostic:
 - `exploration`: ranked region quality when SWE-Explore-style line-level ground truth is available.
 
 The expensive pieces, such as LLM-backed user simulation and LLM-as-judge scoring, are exposed as interfaces in `harness/` and intentionally left replaceable.
+
+## CAIR v2 Minimal-Robust Construction Pipeline
+
+This branch also includes a compact CAIR v2 data-construction pipeline under
+`cair_v2/`. It is separate from the existing `harness/` execution code and is
+intended to turn screened SWE-bench-style candidate issues into compact
+`cair_instance.json` records.
+
+The v2 pipeline intentionally avoids the older long YAML construction chain. It
+uses:
+
+1. one LLM call for `semantic_capsule`,
+2. one LLM call for `dialogue_plan`,
+3. deterministic local compilation,
+4. local sanitizer and quality gate,
+5. localization checkpoint gold extraction,
+6. agent/evaluator-view export.
+
+Set the DeepSeek key only in the environment:
+
+```bash
+export DEEPSEEK_API_KEY="..."
+```
+
+Run a tiny smoke batch:
+
+```bash
+python scripts/run_cair_batch_v2.py \
+  --input data/candidates/diverse_seed_candidates.csv \
+  --output-dir data/cair_instances/batch_v2_smoke \
+  --model-generator deepseek-v4-flash \
+  --model-critical deepseek-v4-pro \
+  --model-reviewer deepseek-v4-pro \
+  --limit 1 \
+  --max-api-calls 30
+```
+
+Export accepted instances:
+
+```bash
+python scripts/export_cair_dataset_v2.py \
+  --input-dir data/cair_instances/batch_v2_smoke \
+  --output data/releases/cair_batch_v2_agent.jsonl \
+  --agent-view
+
+python scripts/export_cair_dataset_v2.py \
+  --input-dir data/cair_instances/batch_v2_smoke \
+  --output data/releases/cair_batch_v2_evaluator.jsonl \
+  --evaluator-view
+```
+
+Agent-view export removes localization gold and oracle fields. Evaluator-view
+keeps oracle and localization gold. Neither view exports raw LLM outputs or the
+full reference patch by default.
+
+See `docs/cair_pipeline_v2_minimal_robust.md` for the construction contract,
+quality gate, template fallback, and localization checkpoint details.
