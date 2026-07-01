@@ -15,6 +15,7 @@ from cair_v2.construction.sanitizer import (
     contains_implementation_hint,
     text_blob,
 )
+from cair_v2.construction.views import agent_view_payload
 
 
 REQUIRED_EVALUATION_KEYS = {
@@ -44,6 +45,27 @@ USER_RUNTIME_CLAIM_RE = re.compile(
 GENERIC_T1_RE = re.compile(
     r"confusing failure around this behavior|one specific behavior looks wrong|"
     r"something (is|seems) wrong|this behavior (is|seems)|not working$",
+    re.IGNORECASE,
+)
+
+TEMPLATE_ARTIFACT_RE = re.compile(
+    r"\bUser initially\b|\bthat call\b|\bWhat I need is\b|"
+    r"\bCorrection:\s*my earlier read may be off here:\s*User\b|"
+    r"\bseems off\.?$",
+    re.IGNORECASE,
+)
+
+SNAKE_CASE_IDENTIFIER_RE = re.compile(r"\b[A-Za-z]+_[A-Za-z0-9_]*\b")
+
+AGENT_VIEW_FORBIDDEN_KEY_RE = re.compile(
+    r"(^|[._])(oracle|gold)([._]|$)|FAIL_TO_PASS|PASS_TO_PASS|test_patch|reference_patch|hidden_test",
+    re.IGNORECASE,
+)
+
+AGENT_VIEW_FORBIDDEN_TEXT_RE = re.compile(
+    r"\boracle\b|localization\s+gold|reference\s+patch|hidden\s+test|"
+    r"private\s+tests?\s+(confirm|validate|verify|show)|"
+    r"FAIL_TO_PASS|PASS_TO_PASS|test_patch|diff --git|\btest_[A-Za-z0-9_]+\b",
     re.IGNORECASE,
 )
 
@@ -85,12 +107,14 @@ def default_checks() -> dict[str, bool]:
     return {
         "semantic_capsule_suitable": False,
         "fact_units_cover_basic_behavior": False,
+        "compact_semantic_capsule_present": False,
         "final_intent_objective_nonempty": False,
         "must_satisfy_nonempty": False,
         "dialogue_turn_count_valid": False,
         "first_turn_vague": False,
         "has_revision_operation": False,
         "introduced_units_valid": False,
+        "compact_dialogue_introduced_units_present": False,
         "non_exposed_units_not_in_dialogue": False,
         "implementation_hint_not_user_facing": False,
         "non_goal_not_in_must_satisfy": False,
@@ -115,12 +139,23 @@ def _contains_item_text(surface: Any, item: str) -> bool:
 
 
 def _agent_view(compact: dict[str, Any]) -> dict[str, Any]:
-    clean = json.loads(json.dumps(compact, ensure_ascii=False))
-    localization = clean.get("localization_checkpoint")
-    if isinstance(localization, dict):
-        localization.pop("gold", None)
-    clean.pop("oracle", None)
-    return clean
+    return agent_view_payload(compact)
+
+
+def _key_paths(value: Any, prefix: str = "$") -> list[str]:
+    if isinstance(value, dict):
+        paths: list[str] = []
+        for key, item in value.items():
+            child = f"{prefix}.{key}"
+            paths.append(child)
+            paths.extend(_key_paths(item, child))
+        return paths
+    if isinstance(value, list):
+        paths = []
+        for index, item in enumerate(value):
+            paths.extend(_key_paths(item, f"{prefix}[{index}]"))
+        return paths
+    return []
 
 
 def _tokens(text: Any) -> set[str]:
@@ -225,6 +260,24 @@ def evaluate_v2_quality(
         checks["fact_units_cover_basic_behavior"] = True
     else:
         hard.append("semantic_capsule.fact_units must cover at least two of symptom/observed_behavior/expected_behavior")
+    compact_capsule = compact.get("semantic_capsule") if isinstance(compact.get("semantic_capsule"), dict) else {}
+    compact_units = compact_capsule.get("fact_units") if isinstance(compact_capsule.get("fact_units"), list) else []
+    compact_revision_support = compact_capsule.get("revision_support") if isinstance(compact_capsule.get("revision_support"), dict) else {}
+    compact_unit_ids = {
+        str(unit.get("unit_id"))
+        for unit in compact_units
+        if isinstance(unit, dict) and str(unit.get("unit_id") or "").strip()
+    }
+    if compact_units and compact_revision_support:
+        checks["compact_semantic_capsule_present"] = True
+        if compact_unit_ids != unit_ids:
+            hard.append("compact semantic_capsule.fact_units do not match construction semantic_capsule.fact_units")
+        for unit in compact_units:
+            if not isinstance(unit, dict) or not str(unit.get("text") or "").strip():
+                hard.append("compact semantic_capsule.fact_units contain an empty or invalid unit")
+                break
+    else:
+        hard.append("compact semantic_capsule.fact_units and revision_support are required")
     if has_revision_fact:
         if not revision_unit_ids:
             revision_unit_ids_valid = False
@@ -263,6 +316,10 @@ def evaluate_v2_quality(
     operations: set[str] = set()
     user_surface: list[str] = []
     introduced_ok = True
+    compact_introduced_ok = True
+    compact_introduced_alignment_ok = True
+    compact_revision_support_ok = True
+    compact_revision_bound_ok = False
     confirm_ok = True
     final_issue_for_confirm = ""
     for index, turn in enumerate(turns):
@@ -278,12 +335,15 @@ def evaluate_v2_quality(
         if index == 0:
             if (
                 len(utterance) <= 90
-                and not re.search(r"\b(expected|root cause|fix|patch|implementation|should)\b", utterance, re.IGNORECASE)
+                and not re.search(r"\b(expected|root cause|fix|patch|implementation|should|incorrectly)\b", utterance, re.IGNORECASE)
                 and not GENERIC_T1_RE.search(utterance)
+                and not SNAKE_CASE_IDENTIFIER_RE.search(utterance)
             ):
                 checks["first_turn_vague"] = True
             else:
                 hard.append("T1 must be <= 90 chars, non-generic, and avoid complete benchmark-style issue details")
+        if TEMPLATE_ARTIFACT_RE.search(utterance):
+            hard.append(f"dialogue.turns[{index}].user_utterance contains template/meta wording")
         if operation == "confirm":
             final_issue_for_confirm = str((compact.get("evaluation_modes") or {}).get("final_issue_prompt") or "")
             if _confirm_repeats_final_intent(utterance, str(final_intent.get("objective") or ""), final_issue_for_confirm):
@@ -293,11 +353,45 @@ def evaluate_v2_quality(
             hard.append(f"dialogue.turns[{index}].user_utterance leaks benchmark metadata or implementation detail")
         if USER_RUNTIME_CLAIM_RE.search(utterance):
             hard.append(f"dialogue.turns[{index}].user_utterance makes unfair runtime/repo access claim")
+        introduced_raw = turn.get("introduced_units")
+        introduced_ids = _str_list(introduced_raw) if isinstance(introduced_raw, list) else []
+        if not isinstance(introduced_raw, list):
+            compact_introduced_ok = False
+            hard.append(f"dialogue.turns[{index}].introduced_units must be a list in compact output")
+        elif not introduced_ids:
+            compact_introduced_ok = False
+            hard.append(f"dialogue.turns[{index}].introduced_units must not be empty")
+        for unit_id in introduced_ids:
+            unit = unit_by_id.get(unit_id)
+            if not unit:
+                compact_introduced_ok = False
+                hard.append(f"dialogue.turns[{index}] references unknown introduced unit {unit_id}")
+            elif unit.get("expose_to_user") is False or unit.get("type") == "implementation_hint":
+                compact_introduced_ok = False
+                hard.append(f"dialogue.turns[{index}] references non-exposable introduced unit {unit_id}")
+        if introduced_ids and not any(_token_overlap(utterance, unit_by_id.get(unit_id, {}).get("text", "")) > 0 for unit_id in introduced_ids):
+            compact_introduced_alignment_ok = False
+            hard.append(f"dialogue.turns[{index}] introduced_units do not match utterance content")
+        if operation in REVISION_OPERATIONS:
+            introduced_revision_ids = set(introduced_ids) & revision_unit_ids
+            support_units = [unit_by_id.get(unit_id, {}) for unit_id in introduced_ids]
+            if not has_revision_fact:
+                compact_revision_support_ok = False
+            elif not introduced_revision_ids:
+                compact_revision_support_ok = False
+                hard.append(f"dialogue.turns[{index}] revision operation is not bound to revision_support.revision_unit_ids")
+            elif not any(unit.get("type") in REVISION_SUPPORT_TYPES for unit in support_units):
+                compact_revision_support_ok = False
+                hard.append(f"dialogue.turns[{index}] revision operation lacks supporting revision fact unit")
+            else:
+                compact_revision_bound_ok = True
         delta = turn.get("state_delta")
         if not isinstance(delta, dict):
             hard.append(f"dialogue.turns[{index}].state_delta must be an object")
         elif any(isinstance(value, list) and not value for value in delta.values()):
             soft.append(f"dialogue.turns[{index}].state_delta contains empty arrays; compact output should be sparse")
+    if turns and compact_introduced_ok:
+        checks["compact_dialogue_introduced_units_present"] = True
 
     if operations & REVISION_OPERATIONS:
         checks["has_revision_operation"] = True
@@ -342,10 +436,10 @@ def evaluate_v2_quality(
     if has_revision_fact and not (operations & REVISION_OPERATIONS):
         revision_support_ok = False
         hard.append("semantic_capsule has revision_support but dialogue has no revision operation")
-    checks["introduced_units_valid"] = introduced_ok
-    checks["introduced_units_content_aligned"] = introduced_alignment_ok
-    checks["revision_operation_fact_supported"] = revision_support_ok
-    checks["revision_operation_bound_to_revision_support"] = revision_bound_ok
+    checks["introduced_units_valid"] = introduced_ok and compact_introduced_ok
+    checks["introduced_units_content_aligned"] = introduced_alignment_ok and compact_introduced_alignment_ok
+    checks["revision_operation_fact_supported"] = revision_support_ok and compact_revision_support_ok
+    checks["revision_operation_bound_to_revision_support"] = revision_bound_ok and compact_revision_bound_ok
     checks["confirm_turn_not_full_prompt"] = confirm_ok
 
     user_text = "\n".join(user_surface)
@@ -417,8 +511,11 @@ def evaluate_v2_quality(
         hard.append("oracle contains benchmark/private test metadata")
 
     agent_view = _agent_view(compact)
-    if "gold" in text_blob(agent_view):
-        hard.append("agent view contains localization gold marker")
+    forbidden_agent_keys = [path for path in _key_paths(agent_view) if AGENT_VIEW_FORBIDDEN_KEY_RE.search(path)]
+    if forbidden_agent_keys:
+        hard.append(f"agent view contains evaluator-only/private key: {forbidden_agent_keys[0]}")
+    elif AGENT_VIEW_FORBIDDEN_TEXT_RE.search(text_blob(agent_view)):
+        hard.append("agent view contains evaluator-only/private text")
     elif contains_benchmark_metadata(agent_view):
         hard.append("agent view contains benchmark/private test metadata")
     else:
@@ -431,6 +528,10 @@ def evaluate_v2_quality(
     if template_used:
         if turns and isinstance(turns[0], dict) and GENERIC_T1_RE.search(str(turns[0].get("user_utterance") or "")):
             template_issues.append("template T1 is generic")
+        if any(TEMPLATE_ARTIFACT_RE.search(str(turn.get("user_utterance") or "")) for turn in turns if isinstance(turn, dict)):
+            template_issues.append("template contains mechanical or meta wording")
+        if turns and isinstance(turns[0], dict) and SNAKE_CASE_IDENTIFIER_RE.search(str(turns[0].get("user_utterance") or "")):
+            template_issues.append("template T1 exposes code-like identifier")
         if template_quality.get("revision_fact_supported") is not True:
             template_issues.append("template lacks explicit revision fact support")
         if revision_support_ok and introduced_alignment_ok and not template_issues:

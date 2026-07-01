@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,51 @@ def _unit_map(capsule: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(unit.get("unit_id")): unit for unit in units if isinstance(unit, dict) and unit.get("unit_id")}
 
 
+def _safe_fact_units(capsule: dict[str, Any]) -> list[dict[str, Any]]:
+    units = capsule.get("fact_units") if isinstance(capsule.get("fact_units"), list) else []
+    safe_units: list[dict[str, Any]] = []
+    for raw in units:
+        if not isinstance(raw, dict):
+            continue
+        safe_units.append(
+            {
+                "unit_id": str(raw.get("unit_id") or "").strip(),
+                "type": str(raw.get("type") or "").strip(),
+                "text": str(raw.get("text") or "").strip(),
+                "source": str(raw.get("source") or "").strip(),
+                "active_by_default": bool(raw.get("active_by_default")),
+                "expose_to_user": bool(raw.get("expose_to_user")),
+                "risk": None if raw.get("risk") in (None, "", "null") else str(raw.get("risk")).strip(),
+            }
+        )
+    return [unit for unit in safe_units if unit["unit_id"] and unit["text"]]
+
+
+def normalize_semantic_capsule(capsule: dict[str, Any]) -> dict[str, Any]:
+    suitability = capsule.get("suitability") if isinstance(capsule.get("suitability"), dict) else {}
+    revision_support = capsule.get("revision_support") if isinstance(capsule.get("revision_support"), dict) else {}
+    guidance = capsule.get("dialogue_guidance") if isinstance(capsule.get("dialogue_guidance"), dict) else {}
+    return {
+        "suitability": {
+            "is_cair_suitable": suitability.get("is_cair_suitable") is True,
+            "risk_level": str(suitability.get("risk_level") or "").strip(),
+            "reason": str(suitability.get("reason") or "").strip(),
+        },
+        "fact_units": _safe_fact_units(capsule),
+        "revision_support": {
+            "has_revision_fact": revision_support.get("has_revision_fact") is True,
+            "revision_unit_ids": _str_list(revision_support.get("revision_unit_ids")),
+            "revision_types": _str_list(revision_support.get("revision_types")),
+            "reason": str(revision_support.get("reason") or "").strip(),
+        },
+        "dialogue_guidance": {
+            key: _str_list(value)
+            for key, value in guidance.items()
+            if key in {"vague_symptom_units", "context_units", "revision_units", "regression_units"}
+        },
+    }
+
+
 def _introduced_units(turn: dict[str, Any], units_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for unit_id in _str_list(turn.get("introduced_units")):
@@ -94,8 +140,26 @@ def _unit_texts(units: list[dict[str, Any]], allowed_types: set[str] | None = No
             continue
         text = str(unit.get("text") or "").strip()
         if text:
-            values.append(text)
+            values.append(_public_unit_text(text))
     return _str_list(values)
+
+
+def _public_unit_text(text: str) -> str:
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(
+        r"\bthen\s+call\s+[A-Za-z_][A-Za-z0-9_.]*\([^)]*\)",
+        "then trigger that case",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\bcall\s+[A-Za-z_][A-Za-z0-9_.]*\([^)]*\)",
+        "trigger that case",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def compile_state_delta(turn: dict[str, Any], introduced: list[dict[str, Any]], final_intent: dict[str, Any]) -> dict[str, list[str]]:
@@ -145,11 +209,13 @@ def compile_dialogue_turns(capsule: dict[str, Any], dialogue_plan: dict[str, Any
     for index, raw in enumerate(turns, start=1):
         if not isinstance(raw, dict):
             continue
+        introduced_ids = [unit_id for unit_id in _str_list(raw.get("introduced_units")) if unit_id in units_by_id]
         introduced = _introduced_units(raw, units_by_id)
         turn = {
             "turn_id": f"T{index}",
             "operation": str(raw.get("operation") or ""),
             "user_utterance": str(raw.get("user_utterance") or "").strip(),
+            "introduced_units": introduced_ids,
             "state_delta": compile_state_delta(raw, introduced, final_intent),
         }
         compiled.append(turn)
@@ -288,6 +354,7 @@ def build_cair_instance_v2(
 ) -> dict[str, Any]:
     source_record = read_json(instance_dir / "source_record.json")
     final_intent = normalize_final_intent(semantic_capsule)
+    compact_semantic_capsule = normalize_semantic_capsule(semantic_capsule)
     oracle = normalize_oracle(semantic_capsule, final_intent)
     turns = compile_dialogue_turns(semantic_capsule, dialogue_plan)
     localization_gold = localization_gold or extract_localization_gold(instance_dir)
@@ -299,6 +366,7 @@ def build_cair_instance_v2(
         "domain": domain_for_repo(str(source_record.get("repo") or "")),
         "source_name": source_record.get("source_name"),
         "base_commit": source_record.get("base_commit"),
+        "semantic_capsule": compact_semantic_capsule,
         "final_intent": final_intent,
         "dialogue": {
             "turns": turns,
@@ -344,9 +412,9 @@ This is a CAIR pipeline v2 minimal-robust compact instance.
 
 Formal files:
 
-- `source_record.json`: source SWE-bench issue metadata for construction traceability.
 - `cair_instance.json`: compact benchmark instance consumed by downstream evaluators.
 - `quality_report.json`: local construction-time quality gate result.
+- `source_record.json`: public source metadata for traceability; it excludes private test lists and reference patches.
 - `.build/`: debug-only semantic capsule, dialogue plan, raw LLM outputs, and retry logs.
 
 Construction status: `{compact.get('metadata', {}).get('construction_status')}`

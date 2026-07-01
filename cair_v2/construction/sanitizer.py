@@ -22,6 +22,21 @@ IMPLEMENTATION_HINT_RE = re.compile(
 
 PRIVATE_TEST_NAME_RE = re.compile(r"\btest_[A-Za-z0-9_]+\b")
 
+CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID = "U999"
+CANONICAL_SOURCE_UNCERTAINTY_TEXT = (
+    "User explicitly expresses uncertainty about whether the observed behavior is a bug or intended behavior."
+)
+
+SOURCE_UNCERTAINTY_REVISION_PATTERNS = [
+    re.compile(r"\b(?:i\s+)?might\s+be\s+missing\s+something\b", re.IGNORECASE),
+    re.compile(r"\b(?:i\s+)?may\s+be\s+missing\s+something\b", re.IGNORECASE),
+    re.compile(r"\bam\s+i\s+missing\s+something\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+sure\s+(?:if|whether)\s+(?:this|that|it)\s+(?:is|was)\s+(?:a\s+)?(?:bug|expected|intended)\b", re.IGNORECASE),
+    re.compile(r"\bunsure\s+(?:if|whether)\s+(?:this|that|it)\s+(?:is|was)\s+(?:a\s+)?(?:bug|expected|intended)\b", re.IGNORECASE),
+    re.compile(r"\b(?:is|was)\s+(?:this|that|it)\s+(?:expected|intended)\b", re.IGNORECASE),
+    re.compile(r"\b(?:this|that|it)\s+(?:feels|looks|seems)\s+like\s+a\s+bug\b", re.IGNORECASE),
+]
+
 
 @dataclass
 class SanitizerResult:
@@ -114,7 +129,106 @@ def _dedupe_strings(values: Any) -> list[str]:
     return result
 
 
-def sanitize_semantic_capsule(capsule: dict[str, Any]) -> SanitizerResult:
+def _has_source_uncertainty_revision(source_text: str | None) -> bool:
+    text = " ".join(str(source_text or "").split())
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in SOURCE_UNCERTAINTY_REVISION_PATTERNS)
+
+
+def _next_unit_id(units: list[dict[str, Any]]) -> str:
+    used = {str(unit.get("unit_id") or "").strip() for unit in units}
+    highest = 0
+    for unit_id in used:
+        match = re.fullmatch(r"U(\d+)", unit_id)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    candidate = highest + 1
+    while f"U{candidate}" in used:
+        candidate += 1
+    return f"U{candidate}"
+
+
+def _remap_unit_id_refs(value: Any, remap: dict[str, str]) -> Any:
+    if not remap:
+        return value
+    if isinstance(value, str):
+        return remap.get(value, value)
+    if isinstance(value, list):
+        return [_remap_unit_id_refs(item, remap) for item in value]
+    if isinstance(value, dict):
+        return {key: _remap_unit_id_refs(item, remap) for key, item in value.items()}
+    return value
+
+
+def _ensure_source_uncertainty_revision(
+    units: list[dict[str, Any]],
+    source_text: str | None,
+    warnings: list[str],
+) -> tuple[list[str], dict[str, str]]:
+    if not _has_source_uncertainty_revision(source_text):
+        return [], {}
+
+    canonical_unit = None
+    ambiguity_unit = None
+    used_ids = {str(unit.get("unit_id") or "").strip() for unit in units}
+    for unit in units:
+        unit_id = str(unit.get("unit_id") or "").strip()
+        if unit_id == CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID:
+            canonical_unit = unit
+        if unit.get("type") == "ambiguity_or_correction" and ambiguity_unit is None:
+            ambiguity_unit = unit
+
+    remap: dict[str, str] = {}
+    if canonical_unit is not None and canonical_unit.get("type") != "ambiguity_or_correction":
+        new_id = _next_unit_id(units)
+        canonical_unit["unit_id"] = new_id
+        remap[CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID] = new_id
+        used_ids.discard(CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID)
+        used_ids.add(new_id)
+        canonical_unit = None
+        warnings.append(f"moved non-ambiguity fact from {CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID} to {new_id}")
+
+    if canonical_unit is not None:
+        canonical_unit["type"] = "ambiguity_or_correction"
+        canonical_unit["text"] = CANONICAL_SOURCE_UNCERTAINTY_TEXT
+        canonical_unit["source"] = "problem_statement"
+        canonical_unit["active_by_default"] = True
+        canonical_unit["expose_to_user"] = True
+        canonical_unit["risk"] = None
+        warnings.append("stabilized revision_support from canonical source uncertainty unit")
+        return [CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID], remap
+
+    if ambiguity_unit is not None and CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID not in used_ids:
+        old_id = str(ambiguity_unit.get("unit_id") or "").strip()
+        ambiguity_unit["unit_id"] = CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID
+        ambiguity_unit["text"] = CANONICAL_SOURCE_UNCERTAINTY_TEXT
+        ambiguity_unit["source"] = "problem_statement"
+        ambiguity_unit["active_by_default"] = True
+        ambiguity_unit["expose_to_user"] = True
+        ambiguity_unit["risk"] = None
+        if old_id:
+            remap[old_id] = CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID
+        warnings.append("canonicalized source uncertainty ambiguity unit")
+        return [CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID], remap
+
+    unit_id = CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID if CANONICAL_SOURCE_UNCERTAINTY_UNIT_ID not in used_ids else _next_unit_id(units)
+    units.append(
+        {
+            "unit_id": unit_id,
+            "type": "ambiguity_or_correction",
+            "text": CANONICAL_SOURCE_UNCERTAINTY_TEXT,
+            "source": "problem_statement",
+            "active_by_default": True,
+            "expose_to_user": True,
+            "risk": None,
+        }
+    )
+    warnings.append("added source-grounded ambiguity_or_correction revision support")
+    return [unit_id], remap
+
+
+def sanitize_semantic_capsule(capsule: dict[str, Any], *, source_text: str | None = None) -> SanitizerResult:
     warnings: list[str] = []
     hard: list[str] = []
     data = scrub_structure(copy.deepcopy(capsule), warnings)
@@ -175,6 +289,10 @@ def sanitize_semantic_capsule(capsule: dict[str, Any]) -> SanitizerResult:
 
     final_intent = data.get("final_intent") if isinstance(data.get("final_intent"), dict) else {}
     oracle = data.get("oracle") if isinstance(data.get("oracle"), dict) else {}
+    source_uncertainty_revision_ids, unit_id_remap = _ensure_source_uncertainty_revision(normalized_units, source_text, warnings)
+    if unit_id_remap:
+        data["dialogue_guidance"] = _remap_unit_id_refs(data.get("dialogue_guidance"), unit_id_remap)
+        data["revision_support"] = _remap_unit_id_refs(data.get("revision_support"), unit_id_remap)
     unit_type_by_id = {str(unit.get("unit_id")): str(unit.get("type")) for unit in normalized_units}
     inferred_revision_ids = [
         str(unit.get("unit_id"))
@@ -189,7 +307,10 @@ def sanitize_semantic_capsule(capsule: dict[str, Any]) -> SanitizerResult:
         if unit_type_by_id.get(unit_id) in revision_fact_types
     ]
     has_revision_fact = _as_bool(revision_support.get("has_revision_fact"), bool(revision_unit_ids or inferred_revision_ids))
-    if has_revision_fact and not revision_unit_ids:
+    if source_uncertainty_revision_ids:
+        has_revision_fact = True
+        revision_unit_ids = source_uncertainty_revision_ids[:1]
+    elif has_revision_fact and not revision_unit_ids:
         revision_unit_ids = inferred_revision_ids[:4]
     if not has_revision_fact:
         revision_unit_ids = []
@@ -208,7 +329,11 @@ def sanitize_semantic_capsule(capsule: dict[str, Any]) -> SanitizerResult:
         "has_revision_fact": bool(has_revision_fact and revision_unit_ids),
         "revision_unit_ids": revision_unit_ids,
         "revision_types": revision_types,
-        "reason": str(revision_support.get("reason") or ("Supported revision facts found." if revision_unit_ids else "No supported revision fact found in the issue.")).strip(),
+        "reason": (
+            "Explicit source uncertainty supports an ambiguity/correction revision."
+            if source_uncertainty_revision_ids
+            else str(revision_support.get("reason") or ("Supported revision facts found." if revision_unit_ids else "No supported revision fact found in the issue.")).strip()
+        ),
     }
 
     guidance = data.get("dialogue_guidance") if isinstance(data.get("dialogue_guidance"), dict) else {}
@@ -277,6 +402,7 @@ def sanitize_compact_instance(instance: dict[str, Any]) -> SanitizerResult:
     if contains_benchmark_metadata(
         {
             "final_intent": data.get("final_intent"),
+            "semantic_capsule": data.get("semantic_capsule"),
             "dialogue": data.get("dialogue"),
             "evaluation_modes": data.get("evaluation_modes"),
             "oracle": data.get("oracle"),

@@ -103,6 +103,7 @@ conflict_or_tension
 - `reason` and `risk` fields should be one short sentence.
 - Extract at least two of: `symptom`, `observed_behavior`, `expected_behavior` when supported by the issue.
 - Explicitly search for revision-related facts before writing `revision_support`.
+- If the problem statement explicitly says the reporter might be missing something, asks whether behavior is expected/intended, or says it feels like a bug, encode that as `ambiguity_or_correction` and use it as revision support.
 - Revision-related fact units include:
   - `rejected_solution`: a solution mentioned or implied in the issue that should not be the final fix.
   - `obsolete_candidate`: an early plausible explanation/direction that should be discarded later.

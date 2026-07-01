@@ -29,12 +29,45 @@ optional_reviewer:
 llm_params:
   semantic_capsule:
     temperature: 0.0
-    max_tokens: 5000
+    max_tokens: 3000
     timeout: 90
+    thinking: disabled
+    response_format: json_object
+    compact_prompt: cair_v2/prompts/semantic_capsule_compact.md
   dialogue_plan:
     temperature: 0.0
-    max_tokens: 1400
+    max_tokens: 3000
     timeout: 90
+    thinking: disabled
+    response_format: json_object
+    compact_prompt: cair_v2/prompts/dialogue_plan_compact.md
+  dialogue_skeleton:
+    temperature: 0.0
+    max_tokens: 1500
+    timeout: 90
+    thinking: disabled
+    response_format: json_object
+    compact_prompt: cair_v2/prompts/dialogue_skeleton_staged_compact.md
+  utterance_realization:
+    temperature: 0.1
+    max_tokens: 1500
+    timeout: 90
+    thinking: disabled
+    response_format: json_object
+    compact_prompt: cair_v2/prompts/utterance_realization_staged_compact.md
+  json_repair:
+    temperature: 0.0
+    max_tokens: 1500
+    timeout: 90
+    thinking: disabled
+    response_format: json_object
+
+reliability:
+  raw_output_dir: .build/raw_llm_outputs
+  same_model_retries_on_empty: 1
+  compact_retries_on_empty: 1
+  fallback_retries_on_empty: 1
+  json_repair_prompt: "只修复 JSON 语法，不改变含义，不新增内容。"
 
 escalation:
   enabled: true

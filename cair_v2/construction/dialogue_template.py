@@ -19,6 +19,7 @@ USER_STOP_PHRASES = [
     "implementation",
     "reference patch",
     "diff",
+    "user initially",
 ]
 
 DANGLING_END_RE = re.compile(
@@ -66,7 +67,8 @@ def _ids(units: list[dict[str, Any]], limit: int = 2) -> list[str]:
 def _clean_text(text: str) -> str:
     text = re.sub(r"`([^`]+)`", r"\1", str(text or ""))
     text = re.sub(r"\b[a-zA-Z0-9_./-]+\.py\b", "the relevant code", text)
-    text = re.sub(r"\b[A-Za-z_][A-Za-z0-9_.]*\([^)]*\)", "that call", text)
+    text = re.sub(r"\b[A-Za-z_][A-Za-z0-9_.]*\([^)]*\)", "a model call", text)
+    text = re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]*\b", "the relevant routine", text)
     for phrase in USER_STOP_PHRASES:
         text = re.sub(re.escape(phrase) + r".*$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip(" .;:")
@@ -88,12 +90,26 @@ def _shorten(text: str, max_chars: int) -> str:
 
 def _contains(text: str, *needles: str) -> bool:
     lowered = text.lower()
-    return any(needle in lowered for needle in needles)
+    return any(needle.lower() in lowered for needle in needles)
 
 
 def _vague_t1(symptom: list[dict[str, Any]], observed: list[dict[str, Any]], final_intent: dict[str, Any]) -> str:
+    raw_source = str((symptom + observed)[0].get("text") if symptom + observed else final_intent.get("objective") or "")
+    raw_lowered = raw_source.lower()
+    if _contains(raw_lowered, "separab", "compoundmodel", "compound model", "block diagonal"):
+        return "A separability result looks wrong for a composed model."
+    if _contains(raw_lowered, "timeseries", "required column"):
+        return "A TimeSeries error message looks misleading."
+    if _contains(raw_lowered, "urlvalidator", "username/password", "credential"):
+        return "URLValidator is accepting a credential URL that looks invalid."
     source = _first_text(symptom + observed, str(final_intent.get("objective") or "this behavior is wrong"), max_chars=160)
     lowered = source.lower()
+    if _contains(lowered, "separab", "compoundmodel", "compound model", "block diagonal"):
+        return "A separability result looks wrong for a composed model."
+    if _contains(lowered, "timeseries", "required column"):
+        return "A TimeSeries error message looks misleading."
+    if _contains(lowered, "urlvalidator", "username/password", "credential"):
+        return "URLValidator is accepting a credential URL that looks invalid."
     if _contains(lowered, "clone"):
         return "Clone is failing in one estimator-parameter case."
     if _contains(lowered, "dataset", "repr", "unit"):
@@ -108,14 +124,25 @@ def _vague_t1(symptom: list[dict[str, Any]], observed: list[dict[str, Any]], fin
         return "One specific case is failing unexpectedly."
     words = source.split()
     fragment = " ".join(words[:9]).strip(" ,.;:")
+    while DANGLING_END_RE.search(fragment):
+        fragment = DANGLING_END_RE.sub("", fragment).rstrip(" ,.;:")
     if not fragment:
         return "One specific behavior looks wrong."
-    utterance = f"{fragment} seems off."
-    return utterance[:89].rstrip(" ,.;:") + ("." if not utterance.endswith(".") else "")
+    return _shorten(f"{fragment} looks wrong.", 89)
 
 
 def _context_utterance(context: list[dict[str, Any]]) -> str:
+    raw_text = str(context[0].get("text") if context else "")
+    raw_lowered = raw_text.lower()
+    if _contains(raw_lowered, "timeseries", "required column", "remove_column"):
+        return "It happens when removing a required TimeSeries column."
+    if _contains(raw_lowered, "separab", "compoundmodel", "compound model", "off-diagonal", "diagonal", " & "):
+        return "It shows up with a nested compound model example."
     text = _first_text(context, "a specific component", max_chars=100)
+    if _contains(text, "timeseries", "required column", "remove_column"):
+        return "It happens when removing a required TimeSeries column."
+    if _contains(text, "separab", "compoundmodel", "compound model", "off-diagonal", "diagonal"):
+        return "It shows up with a nested compound model example."
     if _contains(text, "Dataset", "repr", "unit"):
         return "It seems tied to how Dataset repr shows variables and coordinates."
     if _contains(text, "clone", "estimator"):
@@ -126,19 +153,29 @@ def _context_utterance(context: list[dict[str, Any]]) -> str:
 
 
 def _refine_utterance(observed: list[dict[str, Any]], expected: list[dict[str, Any]]) -> str:
+    raw_combined = " ".join(str(unit.get("text") or "") for unit in observed + expected)
     obs = _first_text(observed, "", max_chars=70)
     exp = _first_text(expected, "", max_chars=62)
+    combined = f"{raw_combined} {obs} {exp}"
+    if _contains(combined, "timeseries", "required column", "valueerror"):
+        return "The error should name the missing required columns, not just time."
+    if _contains(combined, "urlvalidator", "percent-encoded", "user/password", "rfc 1738"):
+        return "URLValidator should reject unencoded credential separators."
+    if _contains(obs + " " + exp, "separab", "compound model", "diagonal", "sub-model"):
+        return "The nested case should still show separate diagonal blocks."
     if obs and exp:
         return _shorten(f"I see {obs}; I expected {exp}.", 125)
     if obs:
         return _shorten(f"The concrete symptom is: {obs}.", 115)
     if exp:
-        return _shorten(f"What I need is: {exp}.", 115)
+        return _shorten(f"The expected behavior is: {exp}.", 115)
     return "The observed behavior doesn't match what I expected."
 
 
 def _revision_utterance(revision: list[dict[str, Any]]) -> str:
     unit = revision[0]
+    raw_text = str(unit.get("text") or "")
+    raw_lower = raw_text.lower()
     text = _first_text([unit], "that workaround", max_chars=105)
     unit_type = str(unit.get("type") or "")
     if unit_type == "negative_constraint":
@@ -148,6 +185,8 @@ def _revision_utterance(revision: list[dict[str, Any]]) -> str:
     if unit_type == "workaround_to_reject":
         return _shorten(f"I don't want to treat this workaround as the real fix: {text}.", 125)
     if unit_type == "ambiguity_or_correction":
+        if "unsure" in raw_lower or "expected" in raw_lower or "confirmed" in raw_lower or "bug" in raw_lower:
+            return "I first thought this might be expected, but it looks like a bug."
         return _shorten(f"Correction: my earlier read may be off here: {text}.", 120)
     if unit_type == "conflict_or_tension":
         return _shorten(f"There's a compatibility concern too: {text}.", 120)
@@ -160,6 +199,8 @@ def _revision_utterance(revision: list[dict[str, Any]]) -> str:
 
 def _regression_utterance(regression: list[dict[str, Any]]) -> str:
     text = _first_text(regression, "the existing behavior", max_chars=75)
+    if _contains(text, "flat compound", "non-nested", "diagonal", "separab"):
+        return "Please keep the flat compound-model case working too."
     return _shorten(f"Please preserve this existing behavior: {text}.", 115)
 
 
@@ -167,6 +208,10 @@ def _confirm_utterance(final_intent: dict[str, Any], expected: list[dict[str, An
     must = final_intent.get("must_satisfy")
     if isinstance(must, list) and must:
         text = _clean_text(str(must[0]))
+        if _contains(text, "nested", "compound", "diagonal", "separab"):
+            return "Yes, the nested case should produce the right block-diagonal result."
+        if _contains(text, "timeseries", "required column", "valueerror"):
+            return "Yes, the error should list all missing required columns."
         return _shorten(f"Yes, that's the target behavior: {text}.", 115)
     text = _first_text(expected, "that final behavior", max_chars=95)
     return _shorten(f"Yes, that's the target behavior: {text}.", 115)
@@ -176,7 +221,7 @@ def build_template_dialogue_plan(capsule: dict[str, Any]) -> dict[str, Any]:
     symptom = _units(capsule, "symptom")
     context = _units(capsule, "affected_component", "reproduction", "boundary_case")
     observed = _units(capsule, "observed_behavior", "error_message")
-    expected = _units(capsule, "expected_behavior", "active_constraint", "negative_constraint")
+    expected = _units(capsule, "expected_behavior", "active_constraint")
     revision = _revision_units(capsule)
     regression = _units(capsule, "regression_expectation")
     final_intent = capsule.get("final_intent") if isinstance(capsule.get("final_intent"), dict) else {}

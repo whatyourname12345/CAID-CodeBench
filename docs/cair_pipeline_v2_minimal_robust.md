@@ -25,6 +25,11 @@ optional reviewer            optional
 export agent/evaluator view  local
 ```
 
+SWE-bench is treated as raw corpus only. The v2 runner should consume a
+suitability-screened CAIR candidate subset, not default to converting all
+SWE-bench records. Screening must reject or downrank issues without enough
+user-visible functional facts, real revision potential, and localization gold.
+
 The goal is not to lower CAIR standards. The goal is to move deterministic, schema-sensitive, and leakage-sensitive work out of the LLM chain.
 
 ## Semantic Capsule
@@ -118,7 +123,9 @@ quality_report.json
 
 The compiler locally generates:
 
+- `semantic_capsule` safe compact fields
 - sparse `dialogue.turns[].state_delta`
+- `dialogue.turns[].introduced_units`
 - `evaluation_modes`
 - `oracle`
 - `localization_checkpoint`
@@ -128,7 +135,8 @@ No separate LLM calls are used for evaluation modes, QA checklist, quality diagn
 
 ## Formal Output
 
-A v2 instance directory should be treated as:
+The stable release contract is the compact instance payload plus the quality
+report. A v2 construction directory may contain:
 
 ```text
 source_record.json
@@ -138,12 +146,38 @@ README.md
 .build/
 ```
 
-Only `cair_instance.json` and `quality_report.json` are intended as stable construction/scoring interfaces. `.build/` is debug-only.
+Only `cair_instance.json` and `quality_report.json` are intended as stable
+construction/scoring interfaces. `source_record.json` is public traceability
+metadata and must exclude reference patches and private test lists. `.build/`
+is debug/private construction material and is not part of the release contract.
 
 The formal compact instance uses sparse fields. Empty state-delta arrays,
 empty forbidden-file/conflict lists, raw risk notes, raw model outputs, and
 candidate-private patch records stay out of `cair_instance.json`. Construction
 debug data belongs under `.build/` and is not part of the release contract.
+
+The formal compact schema must retain the CAIR evidence needed to audit
+intent-revision sharding:
+
+```json
+{
+  "semantic_capsule": {
+    "fact_units": [],
+    "revision_support": {}
+  },
+  "dialogue": {
+    "turns": [
+      {
+        "turn_id": "T1",
+        "operation": "reveal_vague_goal",
+        "user_utterance": "...",
+        "introduced_units": ["U1"],
+        "state_delta": {}
+      }
+    ]
+  }
+}
+```
 
 ## Configuration
 
@@ -235,6 +269,8 @@ Agent view excludes:
 
 - localization gold
 - oracle
+- evaluator-only oracle prompts such as `evaluation_modes.oracle_intent_prompt`
+- non-exposed semantic fact units and `implementation_hint` facts
 - source patch
 - raw LLM output
 - `.build`
@@ -242,6 +278,7 @@ Agent view excludes:
 Evaluator view includes:
 
 - oracle
+- evaluator-only oracle prompts
 - localization gold
 - quality summary
 
@@ -258,6 +295,8 @@ It still excludes full reference patch unless `--include-patch` is explicitly pa
 - T1 <= 90 chars and vague
 - at least one revision operation
 - valid `introduced_units`
+- compact `semantic_capsule.fact_units` and `revision_support`
+- compact `dialogue.turns[].introduced_units`
 - non-exposed facts absent from user dialogue
 - implementation hints absent from user-facing surfaces
 - non-goals/rejected solutions absent from `must_satisfy`

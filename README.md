@@ -2,7 +2,10 @@
 
 CAIR-CodeBench is an interaction-first extension around SWE-bench. It keeps SWE-bench's executable `model_patch` validation, then adds evaluation of how an agent communicates, acquires user intent, resists misleading user guesses, and explores repository context before submitting the final patch.
 
-## Build Tasks
+## Legacy Prototype Task Builder
+
+This section is the older prototype path. It is kept for historical
+experiments only and is not the CAIR v2 data-construction contract.
 
 ```bash
 .venv/bin/python scripts/build_cair_tasks.py \
@@ -40,6 +43,11 @@ This branch also includes a compact CAIR v2 data-construction pipeline under
 intended to turn screened SWE-bench-style candidate issues into compact
 `cair_instance.json` records.
 
+SWE-bench is the raw corpus, not the benchmark distribution. CAIR v2 must not
+default to full SWE-bench conversion. Final CAIR data should come only from a
+CAIR suitability-screened subset with enough user-visible functional facts,
+real intent-revision potential, and localization gold.
+
 The v2 pipeline intentionally avoids the older long YAML construction chain. It
 uses:
 
@@ -49,6 +57,11 @@ uses:
 4. local sanitizer and quality gate,
 5. localization checkpoint gold extraction,
 6. agent/evaluator-view export.
+
+The conversion target is intent-revision sharding, not ordinary sentence
+splitting. A compact instance keeps `semantic_capsule.fact_units`,
+`semantic_capsule.revision_support`, `dialogue.turns[].introduced_units`,
+`final_intent`, `localization_checkpoint`, `oracle`, and `metadata`.
 
 The default configuration is kept in:
 
@@ -94,9 +107,15 @@ python scripts/export_cair_dataset_v2.py \
   --evaluator-view
 ```
 
-Agent-view export removes localization gold and oracle fields. Evaluator-view
-keeps oracle and localization gold. Neither view exports raw LLM outputs or the
-full reference patch by default.
+Agent-view export removes localization gold, oracle fields, evaluator-only
+oracle prompts, and non-exposed semantic fact units. Evaluator-view keeps oracle
+and localization gold. Neither view exports raw LLM outputs, debug `.build`
+content, hidden test lists, or the full reference patch by default.
+
+Release artifacts should be the compact JSONL view plus construction
+`quality_report.json` summaries. Instance directories are construction outputs;
+their `.build/` contents are debug/private material and should not be treated as
+agent-facing data.
 
 See `docs/cair_pipeline_v2_minimal_robust.md` for the construction contract,
 quality gate, template fallback, and localization checkpoint details.

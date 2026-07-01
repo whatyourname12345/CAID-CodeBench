@@ -50,6 +50,7 @@ class EscalationConfig:
 class ModelConfig:
     models: dict[str, str]
     routing: dict[str, Any]
+    llm_params: dict[str, Any]
     escalation: EscalationConfig
 
 
@@ -76,7 +77,7 @@ def load_model_config(path: Path = DEFAULT_MODEL_CONFIG) -> ModelConfig:
         flash_to_pro_on_parse_failure=bool(escalation_data.get("flash_to_pro_on_parse_failure", False)),
         max_escalations_per_instance=int(escalation_data.get("max_escalations_per_instance", 2)),
     )
-    return ModelConfig(models=models, routing=routing, escalation=escalation)
+    return ModelConfig(models=models, routing=routing, llm_params=dict(data.get("llm_params") or {}), escalation=escalation)
 
 
 def load_batch_config(

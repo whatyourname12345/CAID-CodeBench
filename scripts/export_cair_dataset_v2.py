@@ -11,6 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from cair_v2.construction.views import agent_view_payload
+
 
 EXPORTABLE_STATUSES = {"accepted", "accepted_with_template_dialogue"}
 
@@ -23,13 +25,12 @@ def load_batch_state(batch_dir: Path) -> dict[str, Any]:
 
 
 def view_payload(instance: dict[str, Any], *, evaluator_view: bool, include_debug: bool, include_patch: bool, instance_dir: Path) -> dict[str, Any]:
-    clean = json.loads(json.dumps(instance, ensure_ascii=False))
-    localization = clean.get("localization_checkpoint")
-    if isinstance(localization, dict) and not evaluator_view:
-        localization.pop("gold", None)
-    if not evaluator_view:
-        clean.pop("oracle", None)
-    else:
+    if not evaluator_view and include_debug:
+        raise ValueError("--include-debug is evaluator-view only")
+    if not evaluator_view and include_patch:
+        raise ValueError("--include-patch is evaluator-view only")
+    clean = agent_view_payload(instance) if not evaluator_view else json.loads(json.dumps(instance, ensure_ascii=False))
+    if evaluator_view:
         quality_path = instance_dir / "quality_report.json"
         if quality_path.exists():
             quality = json.loads(quality_path.read_text(encoding="utf-8"))
@@ -101,7 +102,15 @@ def export_v2(
         "status_counts": status_counts,
         "include_debug": include_debug,
         "include_patch": include_patch,
-        "default_excludes": ["full reference patch", "raw LLM output", ".build debug data", "hidden/private test details"],
+        "default_excludes": [
+            "full reference patch",
+            "raw LLM output",
+            ".build debug data",
+            "hidden/private test details",
+            "agent-view oracle and evaluator-only prompts",
+            "agent-view localization gold",
+            "agent-view non-exposed semantic fact units",
+        ],
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     quality_report_path.write_text(
@@ -116,7 +125,8 @@ def export_v2(
                 "",
                 "Only `accepted` and `accepted_with_template_dialogue` instances are exported.",
                 "Each JSONL line is one compact `cair_instance.json` payload.",
-                "Agent view removes localization gold and oracle; evaluator view keeps oracle and localization gold.",
+                "Agent view removes localization gold, oracle, evaluator-only prompts, and non-exposed semantic facts.",
+                "Evaluator view keeps oracle and localization gold.",
             ]
         )
         + "\n",
@@ -131,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=PROJECT_ROOT / "data/releases/cair_batch_v2_manifest.json")
     parser.add_argument("--quality-report", type=Path, default=PROJECT_ROOT / "data/releases/cair_batch_v2_quality_report.md")
     parser.add_argument("--include-debug", action="store_true")
-    parser.add_argument("--include-patch", action="store_true")
+    parser.add_argument("--include-patch", action="store_true", help="Evaluator-view only; include source record for traceability.")
     view = parser.add_mutually_exclusive_group()
     view.add_argument("--agent-view", action="store_true", help="Export agent view without localization gold or oracle. Default.")
     view.add_argument("--evaluator-view", action="store_true", help="Export evaluator view with localization gold and oracle.")

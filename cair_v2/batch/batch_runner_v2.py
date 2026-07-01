@@ -16,7 +16,7 @@ from cair_v2.batch.candidate_loader import load_candidate_rows, select_candidate
 from cair_v2.batch.quality_gate_v2 import evaluate_v2_instance_dir, evaluate_v2_quality
 from cair_v2.construction.build_instance_skeleton import patch_metadata_from_candidate, source_record_from_candidate
 from cair_v2.construction.cair_compiler_v2 import build_cair_instance_v2, write_intermediate_debug, write_v2_outputs
-from cair_v2.construction.dialogue_plan import DialoguePlanResult, run_dialogue_plan, validate_dialogue_plan, write_dialogue_plan
+from cair_v2.construction.dialogue_plan import DialoguePlanResult, run_dialogue_plan, run_staged_dialogue_plan, validate_dialogue_plan, write_dialogue_plan
 from cair_v2.construction.dialogue_template import build_template_dialogue_plan
 from cair_v2.construction.instance_io import write_json
 from cair_v2.construction.load_swebench_record import row_to_clean_dict
@@ -46,6 +46,8 @@ class BatchV2Options:
     force: bool = False
     include_rejected: bool = False
     optional_reviewer: bool = False
+    dialogue_strategy: str = "monolithic"
+    llm_params: dict[str, Any] | None = None
 
 
 def rel(path: Path) -> str:
@@ -95,6 +97,22 @@ def create_or_load_instance_v2(record: dict[str, Any], output_dir: Path, *, forc
     instance_dir.mkdir(parents=True, exist_ok=True)
     build_dir = instance_dir / ".build"
     build_dir.mkdir(parents=True, exist_ok=True)
+    if force:
+        for relative in [
+            "cair_instance.json",
+            "quality_report.json",
+            "agent_view.json",
+            "evaluator_view.json",
+            ".build/dialogue_plan.json",
+            ".build/intermediate_debug.json",
+            ".build/retry_log.jsonl",
+        ]:
+            path = instance_dir / relative
+            if path.exists() and path.is_file():
+                path.unlink()
+        raw_outputs = build_dir / "raw_llm_outputs"
+        if raw_outputs.exists():
+            shutil.rmtree(raw_outputs)
 
     source_path = instance_dir / "source_record.json"
     if force or not source_path.exists():
@@ -112,13 +130,132 @@ def _client(model: str, options: BatchV2Options) -> DeepSeekClient | None:
     return DeepSeekClient(model=model, max_retries=options.client_max_retries, timeout=options.client_timeout)
 
 
+def _step_params(options: BatchV2Options, step: str) -> dict[str, Any]:
+    params = dict((options.llm_params or {}).get(step) or {})
+    allowed = {"temperature", "max_tokens", "thinking", "response_format"}
+    return {key: value for key, value in params.items() if key in allowed}
+
+
 def _api_budget_available(state: BatchState, options: BatchV2Options) -> bool:
     return options.no_api or options.dry_run or state.api_calls < options.max_api_calls
 
 
-def _count_api_call(state: BatchState, instance_id: str, result_api_call_made: bool, options: BatchV2Options) -> None:
-    if result_api_call_made and not (options.no_api or options.dry_run):
-        state.add_instance_api_call(instance_id)
+def _count_api_call(state: BatchState, instance_id: str, result_api_call_made: bool | int, options: BatchV2Options) -> None:
+    if options.no_api or options.dry_run:
+        return
+    count = int(result_api_call_made) if isinstance(result_api_call_made, int) else (1 if result_api_call_made else 0)
+    if count > 0:
+        state.add_instance_api_call(instance_id, count)
+
+
+def _fallback_model_for(model: str, options: BatchV2Options) -> str | None:
+    if model == options.model_generator and options.model_critical != model:
+        return options.model_critical
+    if model == options.model_critical and options.model_generator != model:
+        return options.model_generator
+    return None
+
+
+def _record_llm_result_stats(state: BatchState, instance_id: str, step: str, result: Any | None) -> None:
+    if result is None:
+        state.record_llm_step(
+            instance_id,
+            step,
+            calls=0,
+            success=False,
+            error_type="unknown",
+            failure_reason="execution_exception",
+        )
+        return
+    prompt_result = getattr(result, "prompt_result", None)
+    call_results = list(getattr(result, "call_results", None) or getattr(prompt_result, "call_results", None) or [])
+    error_types = [str(call.error_type) for call in call_results if getattr(call, "error_type", None)]
+    result_error_type = getattr(result, "error_type", None)
+    if result_error_type in error_types:
+        result_error_type = None
+    models_used = list(dict.fromkeys(str(call.model) for call in call_results if getattr(call, "model", None)))
+    explicit_model = getattr(result, "model_used", None) or getattr(prompt_result, "model_used", None)
+    if explicit_model and explicit_model not in models_used:
+        models_used.append(explicit_model)
+    state.record_llm_step(
+        instance_id,
+        step,
+        calls=int(getattr(result, "api_calls_made", 0) or len(call_results) or (1 if getattr(result, "api_call_made", False) else 0)),
+        success=bool(getattr(result, "ok", False)),
+        error_type=result_error_type,
+        error_types=error_types,
+        repair_success=bool(getattr(result, "repair_success", False) or getattr(prompt_result, "repair_success", False)),
+        retry_success=bool(getattr(result, "retry_success", False) or getattr(prompt_result, "retry_success", False)),
+        fallback_used=bool(getattr(result, "fallback_used", False) or getattr(prompt_result, "fallback_used", False)),
+        model_used=models_used,
+        failure_reason=None
+        if getattr(result, "ok", False)
+        else (getattr(result, "failure_reason", None) or "; ".join(getattr(result, "errors", []) or [])),
+    )
+
+
+def _record_prompt_result_stats(
+    state: BatchState,
+    instance_id: str,
+    step: str,
+    result: Any | None,
+    *,
+    success: bool,
+    failure_reason: str | None = None,
+    error_type: str | None = None,
+) -> None:
+    if result is None:
+        state.record_llm_step(instance_id, step, error_type="unknown", failure_reason=failure_reason or "missing_prompt_result")
+        return
+    call_results = list(getattr(result, "call_results", None) or [])
+    error_types = [str(call.error_type) for call in call_results if getattr(call, "error_type", None)]
+    result_error_type = error_type or getattr(result, "error_type", None)
+    if result_error_type in error_types:
+        result_error_type = None
+    models_used = list(dict.fromkeys(str(call.model) for call in call_results if getattr(call, "model", None)))
+    if getattr(result, "model_used", None) and result.model_used not in models_used:
+        models_used.append(result.model_used)
+    state.record_llm_step(
+        instance_id,
+        step,
+        calls=len(call_results),
+        success=success,
+        error_type=result_error_type,
+        error_types=error_types,
+        repair_success=bool(getattr(result, "repair_success", False)),
+        retry_success=bool(getattr(result, "retry_success", False)),
+        fallback_used=bool(getattr(result, "fallback_used", False)),
+        model_used=models_used,
+        failure_reason=None if success else (failure_reason or getattr(result, "error", None)),
+    )
+
+
+def _record_staged_dialogue_stats(state: BatchState, instance_id: str, result: DialoguePlanResult) -> None:
+    step_results = result.step_results or {}
+    skeleton_result = step_results.get("dialogue_skeleton")
+    utterance_result = step_results.get("utterance_realization")
+    if skeleton_result is not None:
+        skeleton_ok = skeleton_result.status == "ok" and not result.source.startswith("llm_staged_skeleton")
+        _record_prompt_result_stats(
+            state,
+            instance_id,
+            "dialogue_skeleton",
+            skeleton_result,
+            success=skeleton_ok,
+            failure_reason=None if skeleton_ok else result.failure_reason or "; ".join(result.errors),
+            error_type=result.error_type if not skeleton_ok else None,
+        )
+    if utterance_result is not None:
+        utterance_ok = result.ok
+        _record_prompt_result_stats(
+            state,
+            instance_id,
+            "utterance_realization",
+            utterance_result,
+            success=utterance_ok,
+            failure_reason=None if utterance_ok else result.failure_reason or "; ".join(result.errors),
+            error_type=result.error_type if not utterance_ok else None,
+        )
 
 
 def _template_dialogue_result(instance_dir: Path, capsule: dict[str, Any]) -> DialoguePlanResult:
@@ -137,6 +274,7 @@ def _template_dialogue_result(instance_dir: Path, capsule: dict[str, Any]) -> Di
         warnings=warnings,
         errors=errors,
         source="template",
+        failure_reason=None if not errors else "; ".join(errors),
     )
 
 
@@ -217,6 +355,7 @@ def run_one_instance_v2(
     repo = str(record.get("repo") or "")
     instance_dir = create_or_load_instance_v2(record, output_dir, force=options.force)
     state.ensure_instance(instance_id, repo=repo, path=rel(instance_dir))
+    state.update_instance(instance_id, dialogue_strategy=options.dialogue_strategy)
     item = state.ensure_instance(instance_id)
     if options.resume and item.get("status") in {"accepted", "accepted_with_template_dialogue"} and not options.force:
         quality = evaluate_v2_instance_dir(instance_dir)
@@ -244,10 +383,15 @@ def run_one_instance_v2(
         if not _api_budget_available(state, options):
             break
         try:
+            fallback_model = _fallback_model_for(model, options)
             result = run_semantic_capsule(
                 instance_dir,
                 model=model,
                 client=_client(model, options),
+                fallback_model=fallback_model,
+                fallback_client=_client(fallback_model, options) if fallback_model else None,
+                llm_params=_step_params(options, "semantic_capsule"),
+                json_repair_params=_step_params(options, "json_repair"),
                 force=options.force or label.endswith("_pro"),
                 no_api=options.no_api,
                 dry_run=options.dry_run,
@@ -260,19 +404,41 @@ def run_one_instance_v2(
             append_retry_log(instance_dir, {"step": "semantic_capsule", "event": "failure", "error": error, "label": label})
             result = None
         if result is not None:
-            _count_api_call(state, instance_id, result.api_call_made, options)
+            _count_api_call(state, instance_id, result.api_calls_made, options)
+            _record_llm_result_stats(state, instance_id, "semantic_capsule", result)
             if result.ok:
                 semantic = result
                 state.update_instance(instance_id, semantic_capsule="pass")
-                append_retry_log(instance_dir, {"step": "semantic_capsule", "event": "ok", "label": label, "warnings": result.warnings})
+                append_retry_log(
+                    instance_dir,
+                    {
+                        "step": "semantic_capsule",
+                        "event": "ok",
+                        "label": label,
+                        "warnings": result.warnings,
+                        "retry_success": result.retry_success,
+                        "repair_success": result.repair_success,
+                        "fallback_used": result.fallback_used,
+                        "model_used": result.model_used,
+                    },
+                )
                 if label.endswith("_pro"):
                     state.add_escalation(instance_id, "semantic_capsule", options.model_generator, model, "Flash semantic capsule failed; retried with Pro")
                 break
             append_retry_log(
                 instance_dir,
-                {"step": "semantic_capsule", "event": "quality_failure", "label": label, "errors": result.errors, "warnings": result.warnings},
+                {
+                    "step": "semantic_capsule",
+                    "event": "quality_failure",
+                    "label": label,
+                    "errors": result.errors,
+                    "warnings": result.warnings,
+                    "error_type": result.error_type,
+                },
             )
             semantic = result
+        else:
+            _record_llm_result_stats(state, instance_id, "semantic_capsule", None)
     if options.dry_run or options.no_api:
         state.update_instance(instance_id, status="pending", current_step="dry_run_complete", release_candidate=False)
         state.save()
@@ -313,34 +479,94 @@ def run_one_instance_v2(
         state.save()
         append_retry_log(instance_dir, {"step": "dialogue_plan", "model": model, "event": "start", "label": label})
         try:
-            result = run_dialogue_plan(
-                instance_dir,
-                capsule=capsule,
-                model=model,
-                client=_client(model, options),
-                force=True,
-                no_api=options.no_api,
-                dry_run=options.dry_run,
-                cache_label=label,
-            )
+            fallback_model = _fallback_model_for(model, options)
+            if options.dialogue_strategy == "staged":
+                result = run_staged_dialogue_plan(
+                    instance_dir,
+                    capsule=capsule,
+                    model=model,
+                    client=_client(model, options),
+                    skeleton_params=_step_params(options, "dialogue_skeleton"),
+                    utterance_params=_step_params(options, "utterance_realization"),
+                    json_repair_params=_step_params(options, "json_repair"),
+                    force=True,
+                    no_api=options.no_api,
+                    dry_run=options.dry_run,
+                    cache_label=label,
+                )
+            else:
+                result = run_dialogue_plan(
+                    instance_dir,
+                    capsule=capsule,
+                    model=model,
+                    client=_client(model, options),
+                    fallback_model=fallback_model,
+                    fallback_client=_client(fallback_model, options) if fallback_model else None,
+                    llm_params=_step_params(options, "dialogue_plan"),
+                    json_repair_params=_step_params(options, "json_repair"),
+                    force=True,
+                    no_api=options.no_api,
+                    dry_run=options.dry_run,
+                    cache_label=label,
+                )
         except Exception as exc:
             state.add_instance_api_call(instance_id)
             append_retry_log(instance_dir, {"step": "dialogue_plan", "model": model, "event": "failure", "error": str(exc), "label": label})
-            result = DialoguePlanResult(ok=False, status="exception", api_call_made=False, errors=[str(exc)], source=f"llm:{model}")
-        _count_api_call(state, instance_id, result.api_call_made, options)
+            result = DialoguePlanResult(ok=False, status="exception", api_call_made=False, errors=[str(exc)], source=f"llm:{model}", error_type="client_exception")
+        _count_api_call(state, instance_id, result.api_calls_made, options)
+        if options.dialogue_strategy == "staged":
+            _record_staged_dialogue_stats(state, instance_id, result)
+        else:
+            _record_llm_result_stats(state, instance_id, "dialogue_plan", result)
         if result.ok:
             plan_result = result
-            state.update_instance(instance_id, dialogue_plan="pass")
-            append_retry_log(instance_dir, {"step": "dialogue_plan", "model": model, "event": "ok", "label": label, "warnings": result.warnings})
+            state.update_instance(
+                instance_id,
+                dialogue_plan="pass",
+                dialogue_plan_llm_success=True,
+                dialogue_plan_repaired=bool(result.repaired),
+                dialogue_plan_quality_retry_used=bool(result.quality_retry_used),
+                dialogue_plan_template_fallback_used=False,
+                dialogue_plan_failure_reason=None,
+            )
+            append_retry_log(
+                instance_dir,
+                {
+                    "step": "dialogue_plan",
+                    "model": model,
+                    "event": "ok",
+                    "label": label,
+                    "warnings": result.warnings,
+                    "retry_success": result.retry_success,
+                    "repair_success": result.repair_success,
+                    "fallback_used": result.fallback_used,
+                    "model_used": result.model_used,
+                },
+            )
             break
         if result.status == "manual_review_required":
             plan_result = result
-            append_retry_log(instance_dir, {"step": "dialogue_plan", "model": model, "event": "manual_review_required", "label": label, "errors": result.errors})
-            break
-        append_retry_log(instance_dir, {"step": "dialogue_plan", "model": model, "event": "quality_failure", "label": label, "errors": result.errors})
+            state.update_instance(
+                instance_id,
+                dialogue_plan_repaired=bool(result.repaired),
+                dialogue_plan_quality_retry_used=bool(result.quality_retry_used),
+                dialogue_plan_failure_reason=result.failure_reason or "; ".join(result.errors),
+            )
+            append_retry_log(instance_dir, {"step": "dialogue_plan", "model": model, "event": "manual_review_required", "label": label, "errors": result.errors, "error_type": result.error_type})
+            if not revision_supported:
+                break
+            continue
+        state.update_instance(
+            instance_id,
+            dialogue_plan_repaired=bool(result.repaired),
+            dialogue_plan_quality_retry_used=bool(result.quality_retry_used),
+            dialogue_plan_failure_reason=result.failure_reason or "; ".join(result.errors),
+        )
+        append_retry_log(instance_dir, {"step": "dialogue_plan", "model": model, "event": "quality_failure", "label": label, "errors": result.errors, "error_type": result.error_type})
+        plan_result = result
 
     if plan_result is None or not plan_result.ok:
-        if plan_result is not None and plan_result.status == "manual_review_required":
+        if plan_result is not None and plan_result.status == "manual_review_required" and not revision_supported:
             state.update_instance(
                 instance_id,
                 status="manual_review_required",
@@ -348,6 +574,9 @@ def run_one_instance_v2(
                 dialogue_plan="manual_review_required",
                 last_error="; ".join(plan_result.errors),
                 failure_reason="no_supported_revision_fact",
+                dialogue_plan_llm_success=False,
+                dialogue_plan_template_fallback_used=False,
+                dialogue_plan_failure_reason=plan_result.failure_reason or "; ".join(plan_result.errors),
                 suggested_fix="Inspect .build/semantic_capsule.json revision_support; do not force a CAIR revision without issue evidence.",
             )
             state.save()
@@ -368,12 +597,29 @@ def run_one_instance_v2(
                 dialogue_plan="manual_review_required",
                 last_error="semantic_capsule has no supported revision fact; template fallback skipped",
                 failure_reason="no_supported_revision_fact",
+                dialogue_plan_llm_success=False,
+                dialogue_plan_template_fallback_used=False,
+                dialogue_plan_failure_reason="semantic_capsule has no supported revision fact; template fallback skipped",
                 suggested_fix="Manual review can decide whether this issue should be used as underspecification-only or excluded from CAIR revision seeds.",
             )
             state.save()
             return
+        llm_failure_reason = plan_result.failure_reason if plan_result is not None else "dialogue_plan budget exhausted"
+        if not llm_failure_reason and plan_result is not None:
+            llm_failure_reason = "; ".join(plan_result.errors)
         state.add_escalation(instance_id, "dialogue_plan", options.model_critical, "template", "Pro and Flash dialogue plan failed or budget exhausted")
         plan_result = _template_dialogue_result(instance_dir, capsule)
+        state.record_llm_step(
+            instance_id,
+            "dialogue_plan" if options.dialogue_strategy == "monolithic" else "utterance_realization",
+            fallback_used=True,
+        )
+        state.update_instance(
+            instance_id,
+            dialogue_plan_template_fallback_used=True,
+            dialogue_plan_llm_success=False,
+            dialogue_plan_failure_reason=llm_failure_reason or plan_result.failure_reason or "; ".join(plan_result.errors),
+        )
         append_retry_log(
             instance_dir,
             {"step": "dialogue_template", "event": "ok" if plan_result.ok else "failure", "errors": plan_result.errors, "warnings": plan_result.warnings},
@@ -387,11 +633,14 @@ def run_one_instance_v2(
             dialogue_plan="fail",
             last_error="; ".join(plan_result.errors),
             failure_reason="template_dialogue_needs_revision_fact" if plan_result.source == "template" else "dialogue_plan_and_template_failed",
+            dialogue_plan_llm_success=False,
+            dialogue_plan_template_fallback_used=plan_result.source == "template",
+            dialogue_plan_failure_reason=plan_result.failure_reason or "; ".join(plan_result.errors),
         )
         state.save()
         return
     if plan_result.source == "template":
-        state.update_instance(instance_id, dialogue_plan="template")
+        state.update_instance(instance_id, dialogue_plan="template", dialogue_plan_template_fallback_used=True)
 
     status = finalize_v2(
         instance_dir=instance_dir,
@@ -418,8 +667,14 @@ def run_batch_v2(options: BatchV2Options, config: BatchConfig) -> BatchState:
         model_generator=options.model_generator,
         model_critical=options.model_critical,
         model_reviewer=options.model_reviewer,
+        reset=options.force and not options.resume,
     )
     state.data["pipeline_version"] = "v2_minimal_robust"
+    state.data["dialogue_strategy"] = options.dialogue_strategy
+    state.data["json_route"] = {
+        step: _step_params(options, step)
+        for step in ["semantic_capsule", "dialogue_plan", "dialogue_skeleton", "utterance_realization", "json_repair"]
+    }
     rows = select_rows_for_v2(
         options.input_file,
         limit=options.limit,

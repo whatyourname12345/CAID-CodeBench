@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--include-rejected", action="store_true")
     parser.add_argument("--optional-reviewer", action="store_true", help="Reserved for future v2 reviewer pass; default v2 skips reviewer.")
+    parser.add_argument("--dialogue-strategy", choices=["monolithic", "staged"], default="monolithic")
     return parser.parse_args()
 
 
@@ -59,6 +60,8 @@ def main() -> None:
         force=args.force,
         include_rejected=args.include_rejected,
         optional_reviewer=args.optional_reviewer,
+        dialogue_strategy=args.dialogue_strategy,
+        llm_params=config.model_config.llm_params,
     )
     try:
         state = run_batch_v2(options, config)

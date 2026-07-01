@@ -42,8 +42,9 @@ class BatchState:
         model_generator: str,
         model_critical: str,
         model_reviewer: str,
+        reset: bool = False,
     ) -> "BatchState":
-        if path.exists():
+        if path.exists() and not reset:
             data = json.loads(path.read_text(encoding="utf-8"))
             return cls(path=path, data=data)
         data = {
@@ -85,6 +86,7 @@ class BatchState:
                 "attempts": 0,
                 "api_calls": 0,
                 "models_used": {},
+                "llm_stats": {},
                 "escalations": [],
                 "last_error": None,
                 "failure_reason": None,
@@ -92,6 +94,12 @@ class BatchState:
                 "reviewer": None,
                 "semantic_capsule": None,
                 "dialogue_plan": None,
+                "dialogue_strategy": "monolithic",
+                "dialogue_plan_llm_success": False,
+                "dialogue_plan_repaired": False,
+                "dialogue_plan_quality_retry_used": False,
+                "dialogue_plan_template_fallback_used": False,
+                "dialogue_plan_failure_reason": None,
                 "localization_checkpoint_ready": None,
                 "gold_files_count": None,
                 "gold_functions_count": None,
@@ -103,6 +111,15 @@ class BatchState:
             }
         elif path:
             instances[instance_id]["path"] = path
+        if instance_id in instances:
+            item = instances[instance_id]
+            item.setdefault("dialogue_plan_llm_success", False)
+            item.setdefault("dialogue_strategy", "monolithic")
+            item.setdefault("dialogue_plan_repaired", False)
+            item.setdefault("dialogue_plan_quality_retry_used", False)
+            item.setdefault("dialogue_plan_template_fallback_used", False)
+            item.setdefault("dialogue_plan_failure_reason", None)
+            item.setdefault("llm_stats", {})
         return instances[instance_id]
 
     def update_instance(self, instance_id: str, **updates: Any) -> dict[str, Any]:
@@ -126,3 +143,61 @@ class BatchState:
         item = self.ensure_instance(instance_id)
         item["api_calls"] = int(item.get("api_calls", 0)) + count
         self.increment_api_calls(count)
+
+    def record_llm_step(
+        self,
+        instance_id: str,
+        step: str,
+        *,
+        calls: int = 0,
+        success: bool = False,
+        error_type: str | None = None,
+        error_types: list[str] | None = None,
+        repair_success: bool = False,
+        retry_success: bool = False,
+        fallback_used: bool = False,
+        model_used: str | list[str] | None = None,
+        failure_reason: str | None = None,
+    ) -> None:
+        item = self.ensure_instance(instance_id)
+        all_stats = item.setdefault("llm_stats", {})
+        stats = all_stats.setdefault(
+            step,
+            {
+                "calls": 0,
+                "success": 0,
+                "empty_response": 0,
+                "timeout": 0,
+                "invalid_json": 0,
+                "truncated_json": 0,
+                "schema_invalid": 0,
+                "rate_limited": 0,
+                "server_error": 0,
+                "client_exception": 0,
+                "unknown": 0,
+                "repair_success": 0,
+                "retry_success": 0,
+                "fallback_used": 0,
+                "model_used": [],
+                "failure_reason": None,
+            },
+        )
+        stats["calls"] = int(stats.get("calls", 0)) + int(calls)
+        if success:
+            stats["success"] = int(stats.get("success", 0)) + 1
+        for error_type in ([error_type] if error_type else []) + list(error_types or []):
+            key = error_type if error_type in stats else "unknown"
+            stats[key] = int(stats.get(key, 0)) + 1
+        if repair_success:
+            stats["repair_success"] = int(stats.get("repair_success", 0)) + 1
+        if retry_success:
+            stats["retry_success"] = int(stats.get("retry_success", 0)) + 1
+        if fallback_used:
+            stats["fallback_used"] = int(stats.get("fallback_used", 0)) + 1
+        model_values = model_used if isinstance(model_used, list) else ([model_used] if model_used else [])
+        for model_value in model_values:
+            models = stats.setdefault("model_used", [])
+            if model_value not in models:
+                models.append(model_value)
+        if failure_reason:
+            stats["failure_reason"] = failure_reason
