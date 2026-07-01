@@ -153,7 +153,9 @@ class DeepSeekClient:
             reason = getattr(exc, "reason", exc)
             error_type = "timeout" if isinstance(reason, (TimeoutError, socket.timeout)) else "client_exception"
             return _HTTPCall(status_code=None, headers={}, body="", error_type=error_type, error_message=str(exc))
-        except (http.client.IncompleteRead, OSError) as exc:
+        except http.client.IncompleteRead as exc:
+            return _HTTPCall(status_code=None, headers={}, body="", error_type="server_error", error_message=str(exc))
+        except OSError as exc:
             return _HTTPCall(status_code=None, headers={}, body="", error_type="client_exception", error_message=str(exc))
         finally:
             if old_handler is not None:

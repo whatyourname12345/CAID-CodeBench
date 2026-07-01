@@ -19,7 +19,7 @@ def resolve(path: Path) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run CAIR pipeline v2 minimal-robust compact batch.")
+    parser = argparse.ArgumentParser(description="Run CAIR pipeline v2 batch construction.")
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "configs/batch_default.yaml")
@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--include-rejected", action="store_true")
     parser.add_argument("--optional-reviewer", action="store_true", help="Reserved for future v2 reviewer pass; default v2 skips reviewer.")
+    parser.add_argument("--mode", choices=["staged-llm", "minimal-robust"], default="minimal-robust")
     parser.add_argument("--dialogue-strategy", choices=["monolithic", "staged"], default="monolithic")
     return parser.parse_args()
 
@@ -61,8 +62,11 @@ def main() -> None:
         include_rejected=args.include_rejected,
         optional_reviewer=args.optional_reviewer,
         dialogue_strategy=args.dialogue_strategy,
+        mode=args.mode,
         llm_params=config.model_config.llm_params,
     )
+    if args.mode == "staged-llm" and args.dialogue_strategy != "monolithic":
+        print("--dialogue-strategy is ignored in --mode staged-llm; staged dialogue is intrinsic to the pipeline.")
     try:
         state = run_batch_v2(options, config)
     except MissingAPIKeyError as exc:

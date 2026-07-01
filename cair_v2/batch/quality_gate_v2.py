@@ -306,12 +306,10 @@ def evaluate_v2_quality(
 
     dialogue = compact.get("dialogue") if isinstance(compact.get("dialogue"), dict) else {}
     turns = dialogue.get("turns") if isinstance(dialogue.get("turns"), list) else []
-    if 3 <= len(turns) <= 8:
+    if 4 <= len(turns) <= 6:
         checks["dialogue_turn_count_valid"] = True
-        if not (4 <= len(turns) <= 6):
-            soft.append("dialogue turn count is valid but outside recommended 4-6")
     else:
-        hard.append("dialogue.turns must contain 3-8 turns")
+        hard.append("dialogue.turns must contain 4-6 turns")
 
     operations: set[str] = set()
     user_surface: list[str] = []

@@ -94,6 +94,7 @@ class BatchState:
                 "reviewer": None,
                 "semantic_capsule": None,
                 "dialogue_plan": None,
+                "mode": "minimal-robust",
                 "dialogue_strategy": "monolithic",
                 "dialogue_plan_llm_success": False,
                 "dialogue_plan_repaired": False,
@@ -114,6 +115,7 @@ class BatchState:
         if instance_id in instances:
             item = instances[instance_id]
             item.setdefault("dialogue_plan_llm_success", False)
+            item.setdefault("mode", "minimal-robust")
             item.setdefault("dialogue_strategy", "monolithic")
             item.setdefault("dialogue_plan_repaired", False)
             item.setdefault("dialogue_plan_quality_retry_used", False)
@@ -158,6 +160,10 @@ class BatchState:
         fallback_used: bool = False,
         model_used: str | list[str] | None = None,
         failure_reason: str | None = None,
+        thinking: Any | None = None,
+        response_format: Any | None = None,
+        content_len: int | None = None,
+        reasoning_content_len: int | None = None,
     ) -> None:
         item = self.ensure_instance(instance_id)
         all_stats = item.setdefault("llm_stats", {})
@@ -179,6 +185,11 @@ class BatchState:
                 "retry_success": 0,
                 "fallback_used": 0,
                 "model_used": [],
+                "model": [],
+                "thinking": None,
+                "response_format": None,
+                "content_len": 0,
+                "reasoning_content_len": 0,
                 "failure_reason": None,
             },
         )
@@ -199,5 +210,16 @@ class BatchState:
             models = stats.setdefault("model_used", [])
             if model_value not in models:
                 models.append(model_value)
+            model_alias = stats.setdefault("model", [])
+            if model_value not in model_alias:
+                model_alias.append(model_value)
+        if thinking is not None:
+            stats["thinking"] = thinking
+        if response_format is not None:
+            stats["response_format"] = response_format
+        if content_len is not None:
+            stats["content_len"] = int(stats.get("content_len", 0)) + int(content_len)
+        if reasoning_content_len is not None:
+            stats["reasoning_content_len"] = int(stats.get("reasoning_content_len", 0)) + int(reasoning_content_len)
         if failure_reason:
             stats["failure_reason"] = failure_reason

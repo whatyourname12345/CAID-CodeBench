@@ -351,6 +351,8 @@ def build_cair_instance_v2(
     quality_gate_passed: bool,
     dialogue_source: str,
     localization_gold: LocalizationGold | None = None,
+    pipeline_version: str = "v2_minimal_robust",
+    model_config_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_record = read_json(instance_dir / "source_record.json")
     final_intent = normalize_final_intent(semantic_capsule)
@@ -375,13 +377,14 @@ def build_cair_instance_v2(
         "localization_checkpoint": localization_checkpoint,
         "oracle": oracle,
         "metadata": {
-            "pipeline_version": "v2_minimal_robust",
+            "pipeline_version": pipeline_version,
             "generator_model": generator_model,
             "critical_model": critical_model,
             "reviewer_model": reviewer_model,
             "dialogue_source": dialogue_source,
             "construction_status": construction_status,
             "quality_gate_passed": quality_gate_passed,
+            "model_config_summary": model_config_summary or {},
             "golden_instance": source_record.get("instance_id") == "django__django-14011",
             "created_at": utc_now(),
         },
@@ -408,14 +411,16 @@ def write_v2_outputs(instance_dir: Path, compact: dict[str, Any], quality_report
     write_json(instance_dir / "quality_report.json", quality_report)
     readme = f"""# {compact.get('instance_id')}
 
-This is a CAIR pipeline v2 minimal-robust compact instance.
+This is a CAIR pipeline v2 compact instance.
 
 Formal files:
 
 - `cair_instance.json`: compact benchmark instance consumed by downstream evaluators.
 - `quality_report.json`: local construction-time quality gate result.
 - `source_record.json`: public source metadata for traceability; it excludes private test lists and reference patches.
-- `.build/`: debug-only semantic capsule, dialogue plan, raw LLM outputs, and retry logs.
+- `README.md`: this summary.
+
+Debug-only files live under `.build/` and are not part of release exports.
 
 Construction status: `{compact.get('metadata', {}).get('construction_status')}`
 

@@ -3,6 +3,10 @@ models:
   pro: deepseek-v4-pro
 
 routing:
+  fact_extraction:
+    primary: flash
+  intent_revision:
+    primary: pro
   semantic_capsule:
     primary: flash
     fallback: pro
@@ -11,6 +15,8 @@ routing:
     fallback: flash
   dialogue_template:
     primary: local
+  semantic_reviewer:
+    primary: pro
   deterministic_compiler:
     primary: local
   sanitizer:
@@ -27,40 +33,74 @@ optional_reviewer:
   model: pro
 
 llm_params:
+  fact_extraction:
+    temperature: 0.1
+    max_tokens: 3000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+  intent_revision:
+    temperature: 0.1
+    max_tokens: 3000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
   semantic_capsule:
     temperature: 0.0
     max_tokens: 3000
     timeout: 90
-    thinking: disabled
-    response_format: json_object
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
     compact_prompt: cair_v2/prompts/semantic_capsule_compact.md
   dialogue_plan:
     temperature: 0.0
     max_tokens: 3000
     timeout: 90
-    thinking: disabled
-    response_format: json_object
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
     compact_prompt: cair_v2/prompts/dialogue_plan_compact.md
   dialogue_skeleton:
     temperature: 0.0
     max_tokens: 1500
     timeout: 90
-    thinking: disabled
-    response_format: json_object
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
     compact_prompt: cair_v2/prompts/dialogue_skeleton_staged_compact.md
   utterance_realization:
-    temperature: 0.1
+    temperature: 0.5
     max_tokens: 1500
     timeout: 90
-    thinking: disabled
-    response_format: json_object
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
     compact_prompt: cair_v2/prompts/utterance_realization_staged_compact.md
+  semantic_reviewer:
+    temperature: 0.1
+    max_tokens: 3000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
   json_repair:
     temperature: 0.0
-    max_tokens: 1500
+    max_tokens: 1000
     timeout: 90
-    thinking: disabled
-    response_format: json_object
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
 
 reliability:
   raw_output_dir: .build/raw_llm_outputs

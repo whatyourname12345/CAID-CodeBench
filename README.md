@@ -36,7 +36,7 @@ Diagnostic:
 
 The expensive pieces, such as LLM-backed user simulation and LLM-as-judge scoring, are exposed as interfaces in `harness/` and intentionally left replaceable.
 
-## CAIR v2 Minimal-Robust Construction Pipeline
+## CAIR v2 Construction Pipeline
 
 This branch also includes a compact CAIR v2 data-construction pipeline under
 `cair_v2/`. It is separate from the existing `harness/` execution code and is
@@ -48,15 +48,22 @@ default to full SWE-bench conversion. Final CAIR data should come only from a
 CAIR suitability-screened subset with enough user-visible functional facts,
 real intent-revision potential, and localization gold.
 
-The v2 pipeline intentionally avoids the older long YAML construction chain. It
-uses:
+The recommended research path is `--mode staged-llm`, a five-stage JSON
+pipeline:
 
-1. one LLM call for `semantic_capsule`,
-2. one LLM call for `dialogue_plan`,
-3. deterministic local compilation,
-4. local sanitizer and quality gate,
-5. localization checkpoint gold extraction,
-6. agent/evaluator-view export.
+1. `fact_extraction`
+2. `intent_revision`
+3. `dialogue_skeleton`
+4. `utterance_realization`
+5. `semantic_reviewer`
+6. deterministic local compilation
+7. local sanitizer and `quality_gate_v2`
+8. localization checkpoint gold extraction
+9. agent/evaluator-view export
+
+The older `--mode minimal-robust` path is retained for compatibility. It still
+uses `semantic_capsule` and `dialogue_plan` internally, but is no longer the
+preferred construction path.
 
 The conversion target is intent-revision sharding, not ordinary sentence
 splitting. A compact instance keeps `semantic_capsule.fact_units`,
@@ -86,6 +93,7 @@ Run a tiny smoke batch:
 python scripts/run_cair_batch_v2.py \
   --input data/candidates/diverse_seed_candidates.csv \
   --output-dir data/cair_instances/batch_v2_smoke \
+  --mode staged-llm \
   --model-generator deepseek-v4-flash \
   --model-critical deepseek-v4-pro \
   --model-reviewer deepseek-v4-pro \
@@ -118,4 +126,5 @@ their `.build/` contents are debug/private material and should not be treated as
 agent-facing data.
 
 See `docs/cair_pipeline_v2_minimal_robust.md` for the construction contract,
-quality gate, template fallback, and localization checkpoint details.
+legacy compatibility path, quality gate, template fallback, and localization
+checkpoint details.
