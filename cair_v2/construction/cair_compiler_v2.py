@@ -398,7 +398,7 @@ def build_cair_instance_v2(
     quality_gate_passed: bool,
     dialogue_source: str,
     localization_gold: LocalizationGold | None = None,
-    pipeline_version: str = "v2_minimal_robust",
+    pipeline_version: str = "v2_noisy_refinement",
     model_config_summary: dict[str, Any] | None = None,
     semantic_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:

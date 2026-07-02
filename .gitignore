@@ -10,26 +10,19 @@ __pycache__/
 .build/
 raw_llm_outputs/
 
-# Large local datasets and external reference repositories.
+# Large local datasets, generated releases, and external reference repositories.
 data/raw/
 data/processed/
-data/candidates/
-data/cair_instances/
-data/releases/
-datasets/swe-bench/
+data/candidates/*
+!data/candidates/
+!data/candidates/diverse_seed_candidates.csv
+!data/candidates/diverse_seed_report.md
+data/runs/
+data/instances/
+data/release/
 SWE-bench/
 SWE-Explore-Bench/
 lost_in_conversation/
-
-# Local run outputs.
-results/raw_traces/*
-results/patches/*
-results/test_logs/*
-results/scores/*
-!results/raw_traces/.gitkeep
-!results/patches/.gitkeep
-!results/test_logs/.gitkeep
-!results/scores/.gitkeep
 
 # Papers and extracted analysis text are local research references.
 docs/*.pdf

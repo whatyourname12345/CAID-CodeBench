@@ -94,8 +94,8 @@ class BatchState:
                 "reviewer": None,
                 "semantic_capsule": None,
                 "dialogue_plan": None,
-                "mode": "minimal-robust",
-                "dialogue_strategy": "monolithic",
+                "mode": "staged-llm",
+                "dialogue_strategy": "staged",
                 "dialogue_plan_llm_success": False,
                 "dialogue_plan_repaired": False,
                 "dialogue_plan_quality_retry_used": False,
@@ -115,8 +115,8 @@ class BatchState:
         if instance_id in instances:
             item = instances[instance_id]
             item.setdefault("dialogue_plan_llm_success", False)
-            item.setdefault("mode", "minimal-robust")
-            item.setdefault("dialogue_strategy", "monolithic")
+            item.setdefault("mode", "staged-llm")
+            item.setdefault("dialogue_strategy", "staged")
             item.setdefault("dialogue_plan_repaired", False)
             item.setdefault("dialogue_plan_quality_retry_used", False)
             item.setdefault("dialogue_plan_template_fallback_used", False)

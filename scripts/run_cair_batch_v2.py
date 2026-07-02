@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -21,7 +22,8 @@ def resolve(path: Path) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run CAIR pipeline v2 batch construction.")
     parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, default=None, help="Run output directory. Defaults to data/runs/{run-id}.")
+    parser.add_argument("--run-id", default=None, help="Run id used when --output-dir is omitted.")
     parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "configs/batch_default.yaml")
     parser.add_argument("--model-generator", default=None)
     parser.add_argument("--model-critical", default=None)
@@ -36,18 +38,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--include-rejected", action="store_true")
     parser.add_argument("--optional-reviewer", action="store_true", help="Reserved for future v2 reviewer pass; default v2 skips reviewer.")
-    parser.add_argument("--mode", choices=["staged-llm", "minimal-robust"], default="staged-llm")
-    parser.add_argument("--dialogue-strategy", choices=["monolithic", "staged"], default="monolithic")
+    parser.add_argument("--mode", choices=["staged-llm"], default="staged-llm")
     return parser.parse_args()
+
+
+def default_run_id(input_path: Path) -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{input_path.stem}_{stamp}"
 
 
 def main() -> None:
     args = parse_args()
     config = load_batch_config(resolve(args.config))
     models = config.model_config.models
+    output_dir = resolve(args.output_dir) if args.output_dir else PROJECT_ROOT / "data/runs" / (args.run_id or default_run_id(args.input))
     options = BatchV2Options(
         input_file=resolve(args.input),
-        output_dir=resolve(args.output_dir),
+        output_dir=output_dir,
         model_generator=args.model_generator or models.get("flash", "deepseek-v4-flash"),
         model_critical=args.model_critical or models.get("pro", "deepseek-v4-pro"),
         model_reviewer=args.model_reviewer or models.get("pro", "deepseek-v4-pro"),
@@ -61,14 +68,9 @@ def main() -> None:
         force=args.force,
         include_rejected=args.include_rejected,
         optional_reviewer=args.optional_reviewer,
-        dialogue_strategy=args.dialogue_strategy,
         mode=args.mode,
         llm_params=config.model_config.llm_params,
     )
-    if args.mode == "staged-llm" and args.dialogue_strategy != "monolithic":
-        print("--dialogue-strategy is ignored in --mode staged-llm; staged dialogue is intrinsic to the pipeline.")
-    if args.mode == "minimal-robust":
-        print("--mode minimal-robust is deprecated; use --mode staged-llm for v2_noisy_refinement construction.")
     try:
         state = run_batch_v2(options, config)
     except MissingAPIKeyError as exc:
@@ -85,6 +87,7 @@ def main() -> None:
         if item.get("accepted_after_retry"):
             accepted_after_retry += 1
     print(f"batch_id: {state.data.get('batch_id')}")
+    print(f"run_dir: {output_dir}")
     print(f"pipeline_version: {state.data.get('pipeline_version')}")
     print(f"api_calls: {state.data.get('api_calls')}")
     print("--- status (legacy) ---")

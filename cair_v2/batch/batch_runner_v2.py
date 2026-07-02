@@ -18,18 +18,15 @@ def _step_params(options: BatchV2Options, step: str) -> dict[str, Any]:
 
 
 def _json_route(options: BatchV2Options) -> dict[str, dict[str, Any]]:
-    if options.mode == "staged-llm":
-        steps = [
-            "fact_extraction",
-            "intent_revision",
-            "initial_report_plan",
-            "noisy_revision_event_plan",
-            "realistic_utterance_realization",
-            "semantic_reviewer",
-            "json_repair",
-        ]
-    else:
-        steps = ["semantic_capsule", "dialogue_plan", "dialogue_skeleton", "utterance_realization", "json_repair"]
+    steps = [
+        "fact_extraction",
+        "intent_revision",
+        "initial_report_plan",
+        "noisy_revision_event_plan",
+        "realistic_utterance_realization",
+        "semantic_reviewer",
+        "json_repair",
+    ]
     return {step: _step_params(options, step) for step in steps}
 
 
@@ -70,7 +67,9 @@ def run_batch_v2(options: BatchV2Options, config: BatchConfig) -> BatchState:
         model_reviewer=options.model_reviewer,
         reset=options.force and not options.resume,
     )
-    state.data["pipeline_version"] = "v2_noisy_refinement" if options.mode == "staged-llm" else "v2_minimal_robust"
+    if options.mode != "staged-llm":
+        raise ValueError(f"Unsupported CAIR v2 construction mode: {options.mode}")
+    state.data["pipeline_version"] = "v2_noisy_refinement"
     state.data["mode"] = options.mode
     state.data["dialogue_strategy"] = options.dialogue_strategy
     state.data["json_route"] = _json_route(options)

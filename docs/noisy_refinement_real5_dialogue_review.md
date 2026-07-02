@@ -1,6 +1,6 @@
 # Noisy Refinement Real5 Dialogue Review
 
-Batch: `data/cair_instances/batch_v2_noisy_refinement_real5`
+Historical run: `data/runs/batch_v2_noisy_refinement_real5`
 
 Summary:
 - accepted: 3

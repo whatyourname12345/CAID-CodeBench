@@ -7,8 +7,8 @@ compatibility string that maps to `normalized_status = auto_filtered`
 No scenario definition, dialogue main prompt, source-span threshold, quality
 gate, File/Function Hit@k, model provider, or agent/evaluator view isolation
 rule was loosened.
-
-Batch dir: `data/cair_instances/batch_v2_noisy_refinement_diverse20_autofilter`
+1.
+Run dir: `data/runs/batch_v2_noisy_refinement_diverse20_autofilter`
 (gitignored). Semantics defined in `docs/noisy_refinement_status_taxonomy.md`.
 
 ## 1. Overall statistics
@@ -118,8 +118,8 @@ All 12 accepted samples satisfy `old_progressive_disclosure_pattern=false`,
 
 ## 8. Agent-view leakage scan
 
-Pass. `data/releases/cair_batch_v2_noisy_refinement_diverse20_autofilter_agent.jsonl`
-(12 lines) has zero matches for `oracle`, `gold`, `FAIL_TO_PASS`,
+Pass. The historical agent-view export used for this scan
+(12 lines) had zero matches for `oracle`, `gold`, `FAIL_TO_PASS`,
 `PASS_TO_PASS`, `test_patch`, `reference patch`, `diff --git`, `hidden test`,
 `raw_llm_outputs`, or `test_*`, and no forbidden evaluator-only key path
 (`oracle|gold|fail_to_pass|pass_to_pass|test_patch|reference_patch|hidden`).
@@ -147,5 +147,5 @@ and view isolation. Suggested next step: run **prefiltered100 first**
 (`keep`-tier candidates from `data/candidates/noisy_refinement_prefilter_candidates.csv`)
 to estimate the achievable accepted rate on selected candidates, then
 **raw100** on the unfiltered head for an unbiased denominator. Both stay
-diagnostic-only; do not commit generated `data/cair_instances` or
-`data/releases` artifacts. Do not run limit=100 until explicitly requested.
+diagnostic-only; do not commit generated `data/runs`, `data/instances`, or
+`data/release` artifacts. Do not run limit=100 until explicitly requested.

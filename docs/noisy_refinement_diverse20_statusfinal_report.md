@@ -74,7 +74,7 @@ No `step_failed` samples remain in this run. Under this run, `step_failed` is th
 
 ## 9. Agent-view leakage scan
 
-Pass. `rg` found no matches in `data/releases/cair_batch_v2_noisy_refinement_diverse20_statusfinal_agent.jsonl` for oracle, gold, FAIL_TO_PASS, PASS_TO_PASS, test_patch, reference patch, diff --git, hidden test, raw_llm_outputs, or `test_*`.
+Pass. The historical agent-view export used for this scan had no matches for oracle, gold, FAIL_TO_PASS, PASS_TO_PASS, test_patch, reference patch, diff --git, hidden test, raw_llm_outputs, or `test_*`.
 
 ## 10. Comparison
 
@@ -95,4 +95,4 @@ Pass. `rg` found no matches in `data/releases/cair_batch_v2_noisy_refinement_div
 
 ## 11. Recommendation on limit=50
 
-Yes, a `limit=50` diagnostic is now reasonable. The remaining non-accepted cases are manual-reviewable content/validation outcomes rather than step_failed runtime failures, and accepted-sample quality flags plus view isolation remain intact. Keep the run diagnostic-only and continue not committing generated `data/cair_instances` or `data/releases` artifacts.
+Yes, a `limit=50` diagnostic is now reasonable. The remaining non-accepted cases are manual-reviewable content/validation outcomes rather than step_failed runtime failures, and accepted-sample quality flags plus view isolation remain intact. Keep the run diagnostic-only and continue not committing generated `data/runs`, `data/instances`, or `data/release` artifacts.

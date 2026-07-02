@@ -174,7 +174,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=PROJECT_ROOT / "data/candidates/manual_review_priority.csv")
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "data/candidates/diverse_seed_candidates.csv")
     parser.add_argument("--report", type=Path, default=PROJECT_ROOT / "data/candidates/diverse_seed_report.md")
-    parser.add_argument("--sample-output", type=Path, default=PROJECT_ROOT / "datasets/candidates/diverse_seed_candidates_sample.csv")
+    parser.add_argument("--sample-output", type=Path, default=PROJECT_ROOT / "data/candidates/diverse_seed_candidates_sample.csv")
     parser.add_argument("--target-size", type=int, default=20)
     parser.add_argument("--max-per-repo", type=int, default=2)
     parser.add_argument("--max-domain-ratio", type=float, default=0.3)

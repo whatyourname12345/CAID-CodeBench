@@ -2,46 +2,26 @@
 
 CAIR-CodeBench is an interaction-first extension around SWE-bench. It keeps SWE-bench's executable `model_patch` validation, then adds evaluation of how an agent communicates, acquires user intent, resists misleading user guesses, and explores repository context before submitting the final patch.
 
-## Legacy Prototype Task Builder
+## Data Layout
 
-This section is the older prototype path. It is kept for historical
-experiments only and is not the CAIR v2 data-construction contract.
+All project data artifacts live under `data/`.
 
-```bash
-.venv/bin/python scripts/build_cair_tasks.py \
-  --swe-jsonl datasets/swe-bench/dev.jsonl \
-  --limit 5 \
-  --tasks-out datasets/tasks.jsonl
-```
+- `data/raw/`: downloaded SWE-bench JSONL files from `scripts/download_swebench.py`.
+- `data/processed/`: normalized and deduplicated SWE-bench tables.
+- `data/candidates/`: screened CAIR v2 candidate CSVs and candidate-selection reports.
+- `data/runs/`: per-run CAIR v2 construction outputs; batch grouping is diagnostic provenance, not the final dataset key.
+- `data/instances/`: canonical accepted-instance store keyed by `instance_id`.
+- `data/release/`: final per-instance release database for downstream agent and evaluator use.
 
-This creates:
-
-- `datasets/dialogues/{task_id}.json`
-- `datasets/gold_intent_states/{task_id}.json`
-- `datasets/evaluation_specs/{task_id}.json`
-- `datasets/tasks.jsonl`
-
-## Score Axes
-
-Primary:
-
-- `resolved`: final SWE-style patch success using hidden tests.
-
-Diagnostic:
-
-- `intent`: whether the agent understood the real user need.
-- `dialogue`: naturalness, coherence, and information seeking.
-- `process`: evidence-based debugging, testing, scope control, and resistance to misleading cues.
-- `exploration`: ranked region quality when SWE-Explore-style line-level ground truth is available.
-
-The expensive pieces, such as LLM-backed user simulation and LLM-as-judge scoring, are exposed as interfaces in `harness/` and intentionally left replaceable.
+Only lightweight seed candidates are tracked in ordinary git. Large raw,
+processed, candidate-pool, run, instance, and release artifacts are local or
+external-storage artifacts; see `data/README.md`.
 
 ## CAIR v2 Construction Pipeline
 
 This branch also includes a compact CAIR v2 data-construction pipeline under
-`cair_v2/`. It is separate from the existing `harness/` execution code and is
-intended to turn screened SWE-bench-style candidate issues into compact
-`cair_instance.json` records.
+`cair_v2/`. It turns screened SWE-bench-style candidate issues into compact
+`cair_instance.json` records and per-instance agent/evaluator release views.
 
 SWE-bench is the raw corpus, not the benchmark distribution. CAIR v2 must not
 default to full SWE-bench conversion. Final CAIR data should come only from a
@@ -62,11 +42,6 @@ refinement JSON pipeline:
 8. local sanitizer and `quality_gate_v2`
 9. localization checkpoint gold extraction
 10. agent/evaluator-view export
-
-The older `--mode minimal-robust` path is deprecated and retained only for
-compatibility. It still uses `semantic_capsule` and `dialogue_plan` internally,
-but it is no longer the preferred construction path and should not be used for
-new staged-LLM data generation.
 
 The conversion target is realistic noisy issue refinement, not progressive
 disclosure or ordinary sentence splitting. A compact instance keeps
@@ -96,7 +71,7 @@ Run a tiny smoke batch:
 ```bash
 python scripts/run_cair_batch_v2.py \
   --input data/candidates/diverse_seed_candidates.csv \
-  --output-dir data/cair_instances/batch_v2_smoke \
+  --run-id batch_v2_smoke \
   --mode staged-llm \
   --model-generator deepseek-v4-flash \
   --model-critical deepseek-v4-pro \
@@ -109,26 +84,29 @@ Export accepted instances:
 
 ```bash
 python scripts/export_cair_dataset_v2.py \
-  --input-dir data/cair_instances/batch_v2_smoke \
-  --output data/releases/cair_batch_v2_agent.jsonl \
-  --agent-view
-
-python scripts/export_cair_dataset_v2.py \
-  --input-dir data/cair_instances/batch_v2_smoke \
-  --output data/releases/cair_batch_v2_evaluator.jsonl \
-  --evaluator-view
+  --input-dir data/runs/batch_v2_smoke \
+  --release-dir data/release \
+  --instances-dir data/instances \
+  --release-id cair-v2-smoke \
+  --source-run-id batch_v2_smoke
 ```
 
-Agent-view export removes localization gold, oracle fields, evaluator-only
-oracle prompts, and non-exposed semantic fact units. Evaluator-view keeps oracle
-and localization gold. Neither view exports raw LLM outputs, debug `.build`
-content, hidden test lists, or the full reference patch by default.
+The release exporter writes `data/release/agent/{instance_id}.json`,
+`data/release/evaluator/{instance_id}.json`, `data/release/index.jsonl`,
+`data/release/manifest.json`, and `data/release/quality_report.md`. It also
+promotes accepted construction artifacts into `data/instances/{instance_id}/`.
+The index is merged by `instance_id`, so overlapping exploratory runs do not
+create batch-level ambiguity. Different content for an existing `instance_id`
+is rejected unless `--force` is explicitly supplied.
 
-Release artifacts should be the compact JSONL view plus construction
-`quality_report.json` summaries. Instance directories are construction outputs;
-their `.build/` contents are debug/private material and should not be treated as
-agent-facing data.
+Agent-view release files remove localization gold, oracle fields,
+evaluator-only oracle prompts, and non-exposed semantic fact units.
+Evaluator-view files keep oracle and localization gold. Neither view exports
+raw LLM outputs, debug `.build` content, hidden test lists, or the full
+reference patch by default.
 
 The current construction path is the staged-LLM pipeline under `cair_v2/staged/`
-and `cair_v2/batch/`. `minimal-robust` remains as a compatibility mode, while
-`staged-llm` is the recommended research path.
+and `cair_v2/batch/`.
+
+For the step-by-step conversion procedure teammates should follow, see
+`docs/cair_v2_conversion_runbook.md`.

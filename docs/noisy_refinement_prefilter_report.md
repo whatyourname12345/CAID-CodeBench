@@ -26,8 +26,11 @@ Decision:
 ## 2. Inputs / outputs
 
 - Input candidates: 16778
-- Input file: `/Users/wangziqin/paper/cair-codebench/data/candidates/manual_review_priority.csv`
-- Output candidate pool (`keep` + `deprioritize`, kept in input order): `/Users/wangziqin/paper/cair-codebench/data/candidates/noisy_refinement_prefilter_candidates.csv`
+- Input file: `data/candidates/manual_review_priority.csv`
+- Output candidate pool (`keep` + `deprioritize`, kept in input order): `data/candidates/noisy_refinement_prefilter_candidates.csv`
+
+These large candidate files are not tracked in ordinary git; regenerate them
+locally or share a pinned snapshot through external storage/Git LFS.
 
 ## 3. Decision counts
 
@@ -86,8 +89,8 @@ Decision:
 
 The prefilter does not change the gate, so accepted rate is only estimated by
 raising the density of candidates with observed+expected+reproduction/component+
-refinement signals. Actual lift must be measured by comparing raw100 vs
-prefiltered100. Current estimate: to be measured on limit=100 (raw100 vs prefiltered100).
+refinement signals. The current prefilter100 diagnosis measured a 57% accepted
+rate on the selected candidates.
 
 ## 9. CAIR-Core reserve estimate
 
@@ -95,4 +98,3 @@ prefiltered100. Current estimate: to be measured on limit=100 (raw100 vs prefilt
 - `keep` + `deprioritize` fallback reserve: 8730
 - Sizing note: at a conservative post-gate accepted fraction, a `keep` pool
   of 6288 supports CAIR-Core-500 if the measured accepted rate is >= 8%, and CAIR-Core-1000 if >= 16%.
-
