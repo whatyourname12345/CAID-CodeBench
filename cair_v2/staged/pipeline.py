@@ -62,6 +62,13 @@ def _semantic_capsule(fact_extraction: dict[str, Any], intent_revision: dict[str
         },
         "issue_summary": str(fact_extraction.get("issue_summary") or "").strip(),
         "fact_units": fact_extraction.get("fact_units") if isinstance(fact_extraction.get("fact_units"), list) else [],
+        "source_span_repaired_count": int(fact_extraction.get("source_span_repaired_count") or 0),
+        "source_span_unmatched_count": int(fact_extraction.get("source_span_unmatched_count") or 0),
+        "source_match_status": (
+            fact_extraction.get("source_match_status")
+            if isinstance(fact_extraction.get("source_match_status"), dict)
+            else {}
+        ),
         "revision_support": {
             "has_revision_fact": bool(has_revision),
             "revision_unit_ids": _str_list(support.get("revision_unit_ids")) if has_revision else [],
@@ -232,7 +239,23 @@ def run_staged_pipeline(
     fact = runner.run_step("fact_extraction", fact_context)
     step_results["fact_extraction"] = fact
     if not fact.ok:
-        return _failed_result(status="step_failed", failed_step="fact_extraction", step_results=step_results, errors=fact.errors)
+        routed_status = (
+            fact.status
+            if fact.status in {"manual_review_required", "rejected", "step_failed"}
+            else "step_failed"
+        )
+        if routed_status == "manual_review_required":
+            _write_intermediate_debug(
+                instance_dir,
+                {
+                    "staged_status": "manual_review_required",
+                    "review_stage": "fact_extraction",
+                    "failure_reason": str(fact.data.get("reason") or "fact_grounding_validation_failed"),
+                    "manual_review_reason": str(fact.data.get("manual_review_reason") or "; ".join(fact.errors)),
+                    "fact_extraction": fact.data,
+                },
+            )
+        return _failed_result(status=routed_status, failed_step="fact_extraction", step_results=step_results, errors=fact.errors)
 
     intent_context = {
         "issue_summary": fact.data.get("issue_summary"),
@@ -355,8 +378,27 @@ def run_staged_pipeline(
     utterance = runner.run_step("realistic_utterance_realization", utterance_context)
     step_results["realistic_utterance_realization"] = utterance
     if not utterance.ok:
+        routed_status = (
+            utterance.status
+            if utterance.status in {"manual_review_required", "rejected", "step_failed"}
+            else "step_failed"
+        )
+        if routed_status in {"manual_review_required", "rejected"}:
+            _write_intermediate_debug(
+                instance_dir,
+                {
+                    "staged_status": routed_status,
+                    "review_stage": "realistic_utterance_realization",
+                    "failure_reason": str(utterance.data.get("reason") or routed_status),
+                    "realization_leakage": utterance.data,
+                    "fact_extraction": fact.data,
+                    "intent_revision": intent.data,
+                    "initial_report_plan": initial_plan.data,
+                    "noisy_revision_event_plan": event_plan.data,
+                },
+            )
         return _failed_result(
-            status="step_failed",
+            status=routed_status,
             failed_step="realistic_utterance_realization",
             step_results=step_results,
             errors=utterance.errors,

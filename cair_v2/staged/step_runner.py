@@ -7,10 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from cair_v2.construction.sanitizer import BENCHMARK_METADATA_RE
+from cair_v2.construction.sanitizer import BENCHMARK_METADATA_RE, IMPLEMENTATION_HINT_RE, text_blob
 from cair_v2.llm.clients import DeepSeekClient
 from cair_v2.llm.prompt_runner import PromptStepResult, run_prompt_step
 from cair_v2.staged.schemas import REVISION_FACT_TYPES, StageStepResult
+from cair_v2.staged.source_spans import (
+    SOURCE_MATCH_OK,
+    find_source_span_match,
+    normalized_source_text,
+    summarize_source_matches,
+)
 from cair_v2.staged.validators import VALIDATORS
 
 
@@ -85,7 +91,12 @@ class StagedStepRunner:
         retry_context = dict(context)
         retry_context["previous_errors"] = errors[:12]
         retry_context["previous_output"] = primary_data
+        retry_instruction = self._targeted_retry_instruction(step_name, errors)
+        if retry_instruction:
+            retry_context["targeted_retry_instruction"] = retry_instruction
         retry = self._run_prompt(step_name, retry_context, suffix="_targeted_retry")
+        retry_validated = False
+        failure_data: dict[str, Any] | None = primary_data
         if retry.status == "ok" and isinstance(retry.parsed, dict):
             retry_data = self._local_repair(step_name, retry.parsed, context)
             retry_errors, retry_warnings = self._validate(step_name, retry_data, context)
@@ -109,11 +120,39 @@ class StagedStepRunner:
                 return result
             errors = retry_errors
             warnings = [*warnings, *retry_warnings]
+            retry_validated = True
+            failure_data = retry_data
         else:
             errors = [retry.error or f"{step_name} targeted retry failed"]
 
-        manual_payload = self._manual_review_payload_for_validation(step_name, errors)
+        manual_payload = None
+        if retry_validated:
+            manual_payload = self._manual_review_payload_for_validation(
+                step_name,
+                errors,
+                data=failure_data if isinstance(failure_data, dict) else {},
+                retry_used=True,
+            )
         if manual_payload is not None:
+            if step_name in {"fact_extraction", "realistic_utterance_realization"}:
+                result = StageStepResult(
+                    step_name=step_name,
+                    ok=False,
+                    status=str(manual_payload.get("status") or "manual_review_required"),
+                    data=manual_payload,
+                    errors=errors,
+                    warnings=warnings,
+                    prompt_result=primary,
+                    retry_prompt_result=retry,
+                    retry_used=True,
+                    retry_success=False,
+                    repair_success=bool(primary.repair_success or retry.repair_success),
+                    fallback_used=bool(primary.fallback_used or retry.fallback_used),
+                    model_used=retry.model_used or primary.model_used or config.model,
+                    error_type=str(manual_payload.get("error_type") or "validation_routed"),
+                )
+                self._write_step_error(result)
+                return result
             result = StageStepResult(
                 step_name=step_name,
                 ok=True,
@@ -184,7 +223,73 @@ class StagedStepRunner:
         validator = VALIDATORS[step_name]
         return validator(data, context)
 
-    def _manual_review_payload_for_validation(self, step_name: str, errors: list[str]) -> dict[str, Any] | None:
+    def _manual_review_payload_for_validation(
+        self,
+        step_name: str,
+        errors: list[str],
+        *,
+        data: dict[str, Any] | None = None,
+        retry_used: bool = False,
+    ) -> dict[str, Any] | None:
+        data = data if isinstance(data, dict) else {}
+        if step_name == "fact_extraction":
+            if not self._has_fact_grounding_errors(errors):
+                return None
+            stats = self._source_span_stats_from_fact_data(data)
+            unmatched_error_count = sum(
+                1 for error in errors if "source_span is not aligned to source" in str(error)
+            )
+            if unmatched_error_count > int(stats.get("source_span_unmatched_count") or 0):
+                missing = unmatched_error_count - int(stats.get("source_span_unmatched_count") or 0)
+                stats["source_span_unmatched_count"] = unmatched_error_count
+                status_counts = stats.get("source_match_status")
+                if not isinstance(status_counts, dict):
+                    status_counts = {}
+                status_counts["unmatched"] = int(status_counts.get("unmatched") or 0) + missing
+                stats["source_match_status"] = status_counts
+            return {
+                "status": "manual_review_required",
+                "reason": "fact_grounding_validation_failed",
+                "manual_review_reason": (
+                    "critical source_span unmatched after repair/retry: "
+                    + "; ".join(errors)
+                ),
+                "review_stage": step_name,
+                "source_span_repaired_count": stats["source_span_repaired_count"],
+                "source_span_unmatched_count": stats["source_span_unmatched_count"],
+                "source_match_status": stats["source_match_status"],
+                "issues": errors,
+            }
+        if step_name == "realistic_utterance_realization":
+            if not (self._has_realization_leakage_errors(errors) or self._has_realization_template_artifact_errors(errors)):
+                return None
+            classification = self._classify_realization_leakage(data)
+            status = "rejected" if classification["severity"] == "private_or_evaluator_leakage" else "manual_review_required"
+            reason = (
+                "realization_private_leakage_rejected"
+                if status == "rejected"
+                else (
+                    "utterance_template_artifact"
+                    if self._has_realization_template_artifact_errors(errors)
+                    else "realization_leakage_manual_review"
+                )
+            )
+            return {
+                "status": status,
+                "reason": reason,
+                "manual_review_reason": "; ".join(errors),
+                "review_stage": step_name,
+                "realization_leakage_detected": True,
+                "realization_retry_used": bool(retry_used),
+                "leakage_severity": (
+                    "template_artifact_or_benchmarkish"
+                    if reason == "utterance_template_artifact"
+                    else classification["severity"]
+                ),
+                "final_status": status,
+                "error_type": reason,
+                "issues": errors,
+            }
         if step_name not in {"initial_report_plan", "noisy_revision_event_plan"}:
             return None
         text = "\n".join(errors).lower()
@@ -203,16 +308,74 @@ class StagedStepRunner:
             reason = "insufficient_source_facts_for_noisy_refinement"
         elif "old progressive" in text or "deprecated progressive" in text:
             reason = "would_degenerate_into_progressive_disclosure"
+        elif step_name == "noisy_revision_event_plan":
+            reason = "invalid_noisy_revision_event_plan"
         if not reason:
             return None
         return {
             "status": "manual_review_required",
             "reason": reason,
+            "manual_review_reason": "; ".join(errors),
             "review_stage": step_name,
             "old_progressive_disclosure_pattern": False,
-            "unresolved_wrong_claims": 0,
+            "unresolved_wrong_claims": "not_applicable",
+            "scenario_fit": "not_generated",
             "issues": errors,
         }
+
+    def _has_realization_leakage_errors(self, errors: list[str]) -> bool:
+        text = "\n".join(str(error) for error in errors).lower()
+        return "leaks forbidden implementation/benchmark text" in text or "benchmark/private" in text
+
+    def _has_fact_grounding_errors(self, errors: list[str]) -> bool:
+        text = "\n".join(str(error) for error in errors).lower()
+        return "source_span is not aligned to source" in text or "source_span unmatched" in text
+
+    def _has_realization_template_artifact_errors(self, errors: list[str]) -> bool:
+        text = "\n".join(str(error) for error in errors).lower()
+        return "template artifact" in text
+
+    def _targeted_retry_instruction(self, step_name: str, errors: list[str]) -> str:
+        if step_name == "fact_extraction" and self._has_fact_grounding_errors(errors):
+            return (
+                "Fix only source grounding. Every fact_units[].source_span must be an exact original substring "
+                "from problem_statement or hints_text matching its source field. Do not paraphrase source_span. "
+                "Remove or mark non-user-facing facts that cannot be grounded."
+            )
+        if step_name == "realistic_utterance_realization":
+            if self._has_realization_leakage_errors(errors) or self._has_realization_template_artifact_errors(errors):
+                return (
+                    "Remove template/meta wording and forbidden implementation, benchmark, oracle, gold, patch, diff, "
+                    "hidden-test, reference-patch, and test-name wording while preserving the same source-grounded user issue."
+                )
+        return ""
+
+    def _source_span_stats_from_fact_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(data.get("source_match_status"), dict):
+            return {
+                "source_span_repaired_count": int(data.get("source_span_repaired_count") or 0),
+                "source_span_unmatched_count": int(data.get("source_span_unmatched_count") or 0),
+                "source_match_status": data.get("source_match_status") or {},
+            }
+        units = data.get("fact_units") if isinstance(data.get("fact_units"), list) else []
+        return summarize_source_matches(units)
+
+    def _classify_realization_leakage(self, data: dict[str, Any]) -> dict[str, Any]:
+        blob = text_blob(data)
+        private_re = re.compile(
+            r"\boracle\b|\bgold\b|FAIL_TO_PASS|PASS_TO_PASS|test_patch|reference\s+patch|"
+            r"diff\s+--git|hidden\s+tests?|\braw_llm_outputs\b|\btest_[A-Za-z0-9_]+\b",
+            re.IGNORECASE,
+        )
+        if private_re.search(blob):
+            return {"severity": "private_or_evaluator_leakage"}
+        if BENCHMARK_METADATA_RE.search(blob):
+            return {"severity": "benchmarkish_or_implementation_hint"}
+        if IMPLEMENTATION_HINT_RE.search(blob):
+            return {"severity": "benchmarkish_or_implementation_hint"}
+        if re.search(r"\bpatch\b|\bdiff\b|\btests?\b|\bbenchmark\b", blob, re.IGNORECASE):
+            return {"severity": "benchmarkish_or_implementation_hint"}
+        return {"severity": "benchmarkish_or_implementation_hint"}
 
     def _local_repair(self, step_name: str, data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(data, dict):
@@ -427,6 +590,7 @@ class StagedStepRunner:
         units = self._repair_fact_units(units, context)
         units = self._ensure_basic_behavior_units(units, context)
         repaired["fact_units"] = units
+        repaired.update(summarize_source_matches(units))
         if any(isinstance(unit, dict) and unit.get("type") == "ambiguity_or_correction" for unit in units):
             return repaired
         source_text = str(context.get("problem_statement") or "")
@@ -441,11 +605,14 @@ class StagedStepRunner:
                 "text": "The reporter is uncertain whether the observed behavior is a bug or intended behavior.",
                 "source": "problem_statement",
                 "source_span": match.group(0).strip(),
+                "normalized_source_span": normalized_source_text(match.group(0).strip()),
+                "source_match_status": "exact",
                 "active_by_default": True,
                 "expose_to_user": True,
             }
         )
         repaired["fact_units"] = units
+        repaired.update(summarize_source_matches(units))
         return repaired
 
     def _repair_fact_units(self, units: list[Any], context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -464,12 +631,23 @@ class StagedStepRunner:
             source = str(unit.get("source") or "")
             combined = f"{text}\n{source_span}".lower()
             haystack = str(context.get(source) or "")
-            if source_span and not self._span_in_source(source_span, haystack):
-                exact = self._find_exact_source_span(source_span, text, haystack)
-                if exact:
-                    unit["source_span"] = exact
-                    source_span = exact
+            if source_span:
+                match = find_source_span_match(source_span, haystack, fact_text=text)
+                status = str(match.get("status") or "unmatched")
+                matched_span = str(match.get("matched_span") or "").strip()
+                if status in SOURCE_MATCH_OK and matched_span:
+                    if matched_span != source_span:
+                        unit["original_source_span"] = source_span
+                        unit["source_span"] = matched_span
+                        source_span = matched_span
+                    unit["normalized_source_span"] = normalized_source_text(matched_span)
+                    unit["source_match_status"] = status
+                    if status == "fuzzy":
+                        unit["source_match_score"] = match.get("score")
                     combined = f"{text}\n{source_span}".lower()
+                else:
+                    unit["source_match_status"] = status
+                    unit["normalized_source_span"] = normalized_source_text(source_span)
             if source == "hints_text" and (
                 ".py" in combined
                 or "line " in combined
@@ -523,6 +701,8 @@ class StagedStepRunner:
                     "text": "A CI rendering case fails with a ValueError.",
                     "source": "problem_statement",
                     "source_span": failure_match.group(0),
+                    "normalized_source_span": normalized_source_text(failure_match.group(0)),
+                    "source_match_status": "exact",
                     "active_by_default": True,
                     "expose_to_user": True,
                 }
@@ -536,6 +716,8 @@ class StagedStepRunner:
                     "text": "The reported rendering case should not fail with that ValueError.",
                     "source": "problem_statement",
                     "source_span": failure_match.group(0),
+                    "normalized_source_span": normalized_source_text(failure_match.group(0)),
+                    "source_match_status": "exact",
                     "active_by_default": True,
                     "expose_to_user": True,
                 }

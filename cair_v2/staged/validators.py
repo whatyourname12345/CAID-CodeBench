@@ -15,6 +15,11 @@ from cair_v2.staged.schemas import (
     REVISION_FACT_TYPES,
     REVISION_OPERATIONS,
 )
+from cair_v2.staged.source_spans import (
+    SOURCE_MATCH_OK,
+    find_source_span_match,
+    is_critical_fact_unit,
+)
 
 
 SNAKE_CASE_IDENTIFIER_RE = re.compile(r"\b[A-Za-z]+_[A-Za-z0-9_]*\b")
@@ -205,10 +210,19 @@ def validate_fact_extraction(data: dict[str, Any], context: dict[str, Any]) -> t
             errors.append(f"fact_units[{index}].source_span is empty")
         else:
             haystack = problem if source == "problem_statement" else hints
-            normalized_span = " ".join(source_span.lower().split())
-            normalized_haystack = " ".join(haystack.lower().split())
-            if normalized_span and normalized_span not in normalized_haystack:
-                errors.append(f"fact_units[{index}].source_span is not an exact substring")
+            status = str(raw.get("source_match_status") or "").strip()
+            if status in SOURCE_MATCH_OK:
+                if status == "fuzzy":
+                    warnings.append(f"fact_units[{index}].source_span matched by conservative fuzzy repair")
+            else:
+                match = find_source_span_match(source_span, haystack, fact_text=text)
+                if match.get("status") in SOURCE_MATCH_OK:
+                    if match.get("status") == "fuzzy":
+                        warnings.append(f"fact_units[{index}].source_span matched by conservative fuzzy repair")
+                elif is_critical_fact_unit(raw):
+                    errors.append(f"fact_units[{index}].source_span is not aligned to source")
+                else:
+                    warnings.append(f"fact_units[{index}].source_span is not aligned to source")
         if unit_type == "implementation_hint" and raw.get("expose_to_user") is not False:
             errors.append(f"implementation_hint {unit_id} must expose_to_user=false")
         if unit_type == "implementation_hint" and raw.get("active_by_default") is not False:

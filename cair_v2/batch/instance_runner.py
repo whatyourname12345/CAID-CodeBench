@@ -22,6 +22,7 @@ from cair_v2.construction.patch_summarizer import summarize_patch_record
 from cair_v2.construction.semantic_capsule import run_semantic_capsule
 from cair_v2.construction.sanitizer import sanitize_dialogue_plan
 from cair_v2.llm.clients import DeepSeekClient, MissingAPIKeyError
+from cair_v2.staged.source_spans import summarize_source_matches
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -270,6 +271,68 @@ def _has_revision_support(capsule: dict[str, Any]) -> bool:
     return revision_support.get("has_revision_fact") is True and bool(revision_support.get("revision_unit_ids"))
 
 
+def _source_span_stats_from_capsule(capsule: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(capsule, dict):
+        return {
+            "source_span_repaired_count": 0,
+            "source_span_unmatched_count": 0,
+            "source_match_status": {},
+        }
+    status = capsule.get("source_match_status") if isinstance(capsule.get("source_match_status"), dict) else None
+    if status is not None:
+        return {
+            "source_span_repaired_count": int(capsule.get("source_span_repaired_count") or 0),
+            "source_span_unmatched_count": int(capsule.get("source_span_unmatched_count") or 0),
+            "source_match_status": status,
+        }
+    units = capsule.get("fact_units") if isinstance(capsule.get("fact_units"), list) else []
+    return summarize_source_matches(units)
+
+
+def _source_span_stats_from_result(result: Any) -> dict[str, Any]:
+    step_results = getattr(result, "step_results", {}) if result is not None else {}
+    fact_result = step_results.get("fact_extraction") if isinstance(step_results, dict) else None
+    fact_data = getattr(fact_result, "data", None)
+    if isinstance(fact_data, dict):
+        status = fact_data.get("source_match_status") if isinstance(fact_data.get("source_match_status"), dict) else None
+        if status is not None:
+            return {
+                "source_span_repaired_count": int(fact_data.get("source_span_repaired_count") or 0),
+                "source_span_unmatched_count": int(fact_data.get("source_span_unmatched_count") or 0),
+                "source_match_status": status,
+            }
+        units = fact_data.get("fact_units") if isinstance(fact_data.get("fact_units"), list) else []
+        return summarize_source_matches(units)
+    return _source_span_stats_from_capsule(getattr(result, "semantic_capsule", {}) or {})
+
+
+def _add_source_span_stats(report: dict[str, Any], stats: dict[str, Any]) -> None:
+    report["source_span_repaired_count"] = int(stats.get("source_span_repaired_count") or 0)
+    report["source_span_unmatched_count"] = int(stats.get("source_span_unmatched_count") or 0)
+    report["source_match_status"] = (
+        stats.get("source_match_status") if isinstance(stats.get("source_match_status"), dict) else {}
+    )
+
+
+def _realization_validation_metadata(result: Any) -> dict[str, Any]:
+    step_results = getattr(result, "step_results", {}) if result is not None else {}
+    realization = step_results.get("realistic_utterance_realization") if isinstance(step_results, dict) else None
+    data = getattr(realization, "data", None)
+    if isinstance(data, dict) and data.get("realization_leakage_detected"):
+        return {
+            "realization_leakage_detected": True,
+            "realization_retry_used": bool(data.get("realization_retry_used")),
+            "leakage_severity": str(data.get("leakage_severity") or "unknown"),
+            "final_status": str(data.get("final_status") or getattr(result, "status", "") or "unknown"),
+        }
+    return {
+        "realization_leakage_detected": False,
+        "realization_retry_used": False,
+        "leakage_severity": "none",
+        "final_status": str(getattr(result, "status", "") or "not_applicable"),
+    }
+
+
 def finalize_v2(
     *,
     instance_dir: Path,
@@ -299,6 +362,8 @@ def finalize_v2(
         semantic_review=semantic_review,
     )
     quality = evaluate_v2_quality(compact=compact, semantic_capsule=capsule, dialogue_plan=dialogue_plan)
+    source_stats = _source_span_stats_from_capsule(capsule)
+    _add_source_span_stats(quality, source_stats)
     noisy_quality = quality.get("noisy_refinement") if isinstance(quality.get("noisy_refinement"), dict) else {}
     if quality.get("passed"):
         status = pre_status
@@ -337,6 +402,9 @@ def finalize_v2(
         function_gold_available=quality.get("localization", {}).get("function_gold_available"),
         last_error=None if quality.get("passed") else summary,
         failure_reason=None if quality.get("passed") else quality.get("recommended_action"),
+        source_span_repaired_count=source_stats.get("source_span_repaired_count"),
+        source_span_unmatched_count=source_stats.get("source_span_unmatched_count"),
+        source_match_status=source_stats.get("source_match_status"),
     )
     state.save()
     return status
@@ -370,6 +438,8 @@ def _staged_nonaccepted_outputs(
         semantic_review=semantic_review,
     )
     quality = evaluate_v2_quality(compact=compact, semantic_capsule=capsule, dialogue_plan=dialogue_plan)
+    source_stats = _source_span_stats_from_capsule(capsule)
+    _add_source_span_stats(quality, source_stats)
     noisy_quality = quality.get("noisy_refinement") if isinstance(quality.get("noisy_refinement"), dict) else {}
     quality["semantic_review"] = semantic_review
     quality["passed"] = False
@@ -400,12 +470,31 @@ def _staged_nonaccepted_outputs(
         function_gold_available=quality.get("localization", {}).get("function_gold_available"),
         last_error=summary,
         failure_reason="semantic_reviewer",
+        source_span_repaired_count=source_stats.get("source_span_repaired_count"),
+        source_span_unmatched_count=source_stats.get("source_span_unmatched_count"),
+        source_match_status=source_stats.get("source_match_status"),
     )
     state.save()
 
 
 def _manual_review_reason(errors: list[str]) -> str:
     text = "; ".join(errors).lower()
+    if "fact_grounding_validation_failed" in text:
+        return "fact_grounding_validation_failed"
+    if "source_span is not aligned to source" in text:
+        return "fact_grounding_validation_failed"
+    if "utterance_template_artifact" in text:
+        return "utterance_template_artifact"
+    if "template artifact" in text:
+        return "utterance_template_artifact"
+    if "invalid_noisy_revision_event_plan" in text:
+        return "invalid_noisy_revision_event_plan"
+    if "realization_private_leakage_rejected" in text:
+        return "realization_private_leakage_rejected"
+    if "realization_leakage_manual_review" in text:
+        return "realization_leakage_manual_review"
+    if "leaks forbidden implementation/benchmark text" in text or "benchmark/private wording" in text:
+        return "realization_leakage_manual_review"
     if "no_withheld_units_for_later_refinement" in text:
         return "no_withheld_units_for_later_refinement"
     if "would_degenerate_into_progressive_disclosure" in text:
@@ -424,6 +513,12 @@ def _broad_manual_failure_reason(manual_reason: str) -> str:
         "insufficient_source_facts_for_noisy_refinement",
     }:
         return "insufficient_source_facts_for_noisy_refinement"
+    if manual_reason == "invalid_noisy_revision_event_plan":
+        return "invalid_noisy_revision_event_plan"
+    if manual_reason == "fact_grounding_validation_failed":
+        return "fact_grounding_validation_failed"
+    if manual_reason == "utterance_template_artifact":
+        return "utterance_template_artifact"
     return manual_reason
 
 
@@ -434,16 +529,30 @@ def _write_staged_manual_review_report(
     result,
     state: BatchState,
     manual_reason: str,
+    status: str = "manual_review_required",
 ) -> None:
-    broad_reason = _broad_manual_failure_reason(manual_reason)
+    step_results = getattr(result, "step_results", {}) if result is not None else {}
+    step_data = {}
+    if isinstance(step_results, dict) and result.failed_step:
+        step = step_results.get(result.failed_step)
+        if isinstance(getattr(step, "data", None), dict):
+            step_data = step.data
+    if step_data.get("manual_review_reason"):
+        manual_reason = str(step_data.get("manual_review_reason"))
+    elif step_data.get("reason"):
+        manual_reason = str(step_data.get("reason"))
+    broad_reason = str(step_data.get("reason") or _broad_manual_failure_reason(manual_reason))
+    source_stats = _source_span_stats_from_result(result)
+    realization_meta = _realization_validation_metadata(result)
+    final_status = status if status in {"manual_review_required", "rejected"} else "manual_review_required"
     report = {
         "passed": False,
-        "status": "manual_review_required",
+        "status": final_status,
         "failed_stage": result.failed_step,
         "review_stage": result.failed_step,
         "failure_reason": broad_reason,
         "manual_review_reason": manual_reason,
-        "hard_failures": [],
+        "hard_failures": list(result.errors or []) if final_status == "rejected" else [],
         "soft_warnings": list(result.errors or []),
         "checks": {
             "old_progressive_disclosure_pattern": "not_generated",
@@ -455,18 +564,20 @@ def _write_staged_manual_review_report(
             "unresolved_wrong_claims": "not_applicable",
             "scenario_fit": "not_generated",
         },
-        "recommended_action": "manual_review",
+        "recommended_action": "reject" if final_status == "rejected" else "manual_review",
     }
+    _add_source_span_stats(report, source_stats)
+    report.update(realization_meta)
     write_json(instance_dir / "quality_report.json", report)
     write_intermediate_debug(instance_dir, {"quality_gate_v2": report})
     state.update_instance(
         instance_id,
-        status="manual_review_required",
+        status=final_status,
         current_step=result.failed_step or "staged_pipeline",
         failed_stage=result.failed_step,
         review_stage=result.failed_step,
         semantic_capsule="pass" if result.semantic_capsule else "fail",
-        dialogue_plan="manual_review_required",
+        dialogue_plan=final_status,
         dialogue_plan_llm_success=False,
         dialogue_plan_template_fallback_used=False,
         quality_gate="not_run",
@@ -476,6 +587,13 @@ def _write_staged_manual_review_report(
         manual_review_reason=manual_reason,
         old_progressive_disclosure_pattern="not_generated",
         unresolved_wrong_claims="not_applicable",
+        source_span_repaired_count=source_stats.get("source_span_repaired_count"),
+        source_span_unmatched_count=source_stats.get("source_span_unmatched_count"),
+        source_match_status=source_stats.get("source_match_status"),
+        realization_leakage_detected=realization_meta.get("realization_leakage_detected"),
+        realization_retry_used=realization_meta.get("realization_retry_used"),
+        leakage_severity=realization_meta.get("leakage_severity"),
+        final_status=realization_meta.get("final_status"),
         suggested_fix="Inspect staged .build/*.json; source facts may not support noisy refinement.",
     )
     state.save()
@@ -646,7 +764,7 @@ def run_one_instance_staged_v2(
         )
         return
 
-    if result.status == "manual_review_required":
+    if result.status in {"manual_review_required", "rejected"}:
         manual_reason = _manual_review_reason(result.errors)
         _write_staged_manual_review_report(
             instance_dir=instance_dir,
@@ -654,10 +772,27 @@ def run_one_instance_staged_v2(
             result=result,
             state=state,
             manual_reason=manual_reason,
+            status=result.status,
         )
         return
 
     status = result.status if result.status in {"manual_review_required", "rejected", "step_failed"} else "step_failed"
+    source_stats = _source_span_stats_from_result(result)
+    step_failed_report = {
+        "passed": False,
+        "status": status,
+        "failed_stage": result.failed_step or "staged_pipeline",
+        "failure_reason": result.failed_step or "staged_pipeline_failed",
+        "hard_failures": list(result.errors or []),
+        "soft_warnings": list(result.warnings or []),
+        "checks": {
+            "quality_gate_runtime": "not_run",
+        },
+        "recommended_action": "inspect_runtime_or_schema_failure",
+    }
+    _add_source_span_stats(step_failed_report, source_stats)
+    write_json(instance_dir / "quality_report.json", step_failed_report)
+    write_intermediate_debug(instance_dir, {"quality_gate_v2": step_failed_report})
     state.update_instance(
         instance_id,
         status=status,
@@ -668,6 +803,9 @@ def run_one_instance_staged_v2(
         dialogue_plan_template_fallback_used=False,
         last_error="; ".join(result.errors),
         failure_reason=result.failed_step or "staged_pipeline_failed",
+        source_span_repaired_count=source_stats.get("source_span_repaired_count"),
+        source_span_unmatched_count=source_stats.get("source_span_unmatched_count"),
+        source_match_status=source_stats.get("source_match_status"),
         suggested_fix="Inspect staged .build/*.json; do not force a revision without source fact support.",
     )
     state.save()
