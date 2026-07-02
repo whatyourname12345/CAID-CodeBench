@@ -34,6 +34,48 @@ FORBIDDEN_USER_TERMS_RE = re.compile(
     r"FAIL_TO_PASS|PASS_TO_PASS|hidden\s+test|reference\s+patch",
     re.IGNORECASE,
 )
+OLD_PROGRESSIVE_OPERATIONS = {"reveal_vague_goal", "refine", "add_information", "correct"}
+CLAIM_STATUSES = {
+    "active",
+    "partially_active_with_uncertainty",
+    "speculative",
+    "mistaken",
+    "correction",
+    "retraction",
+    "replacement",
+    "confirmation",
+}
+NON_MONOTONIC_OPERATIONS = {
+    "speculative_hypothesis",
+    "mistaken_clarification",
+    "incorrect_reproduction_detail",
+    "correct_previous_claim",
+    "retract_previous_claim",
+    "replace_previous_claim",
+    "resolve_conflict",
+    "narrow_scope",
+    "broaden_scope",
+    "add_regression_constraint",
+    "confirm_final_active_intent",
+}
+RESOLUTION_OPERATIONS = {
+    "correct_previous_claim",
+    "retract_previous_claim",
+    "replace_previous_claim",
+    "resolve_conflict",
+    "narrow_scope",
+    "broaden_scope",
+    "confirm_final_active_intent",
+}
+CORE_INITIAL_FACT_TYPES = {
+    "symptom",
+    "observed_behavior",
+    "expected_behavior",
+    "reproduction",
+    "uncertainty",
+    "affected_component",
+    "ambiguity_or_correction",
+}
 
 TOKEN_STOPWORDS = {
     "the",
@@ -233,27 +275,122 @@ def validate_intent_revision(data: dict[str, Any], context: dict[str, Any]) -> t
     return errors, warnings
 
 
-def validate_dialogue_skeleton(data: dict[str, Any], context: dict[str, Any]) -> tuple[list[str], list[str]]:
-    errors: list[str] = []
-    warnings: list[str] = []
-    if not isinstance(data, dict):
-        return ["dialogue_skeleton must be a JSON object"], warnings
-    turns = data.get("turns") if isinstance(data.get("turns"), list) else []
-    if not (4 <= len(turns) <= 6):
-        errors.append("dialogue_skeleton.turns must contain 4-6 turns")
-    fact_data = context.get("fact_extraction") if isinstance(context.get("fact_extraction"), dict) else {}
-    intent_data = context.get("intent_revision") if isinstance(context.get("intent_revision"), dict) else {}
+def _manual_review_payload(data: dict[str, Any]) -> tuple[bool, list[str]]:
+    if str(data.get("status") or "").strip() != "manual_review_required":
+        return False, []
+    reason = str(data.get("reason") or "").strip()
+    return True, ([] if reason else ["manual_review_required output must include reason"])
+
+
+def _exposed_ids_and_types(fact_data: dict[str, Any]) -> tuple[set[str], dict[str, str]]:
     unit_by_id = _unit_by_id(fact_data)
     exposed_ids = {
         unit_id
         for unit_id, unit in unit_by_id.items()
         if unit.get("expose_to_user") is not False and unit.get("type") != "implementation_hint"
     }
+    return exposed_ids, {unit_id: str(unit.get("type") or "") for unit_id, unit in unit_by_id.items()}
+
+
+def _core_type_count(unit_ids: list[str], unit_type_by_id: dict[str, str]) -> int:
+    types = {unit_type_by_id.get(unit_id, "") for unit_id in unit_ids}
+    return len(types & CORE_INITIAL_FACT_TYPES)
+
+
+def _validate_unit_refs(
+    *,
+    errors: list[str],
+    field_name: str,
+    values: Any,
+    exposed_ids: set[str],
+    required: bool = False,
+) -> list[str]:
+    unit_ids = _str_list(values)
+    if required and not unit_ids:
+        errors.append(f"{field_name} must be non-empty")
+    for unit_id in unit_ids:
+        if unit_id not in exposed_ids:
+            errors.append(f"{field_name} references unknown or non-exposed unit {unit_id}")
+    return unit_ids
+
+
+def validate_initial_report_plan(data: dict[str, Any], context: dict[str, Any]) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not isinstance(data, dict):
+        return ["initial_report_plan must be a JSON object"], warnings
+    is_manual, manual_errors = _manual_review_payload(data)
+    if is_manual:
+        return manual_errors, warnings
+    fact_data = context.get("fact_extraction") if isinstance(context.get("fact_extraction"), dict) else {}
+    exposed_ids, unit_type_by_id = _exposed_ids_and_types(fact_data)
+    report = data.get("initial_report") if isinstance(data.get("initial_report"), dict) else {}
+    if not report:
+        errors.append("initial_report_plan.initial_report is missing")
+        return errors, warnings
+    introduced = _validate_unit_refs(
+        errors=errors,
+        field_name="initial_report.introduced_units",
+        values=report.get("introduced_units"),
+        exposed_ids=exposed_ids,
+        required=True,
+    )
+    if not (3 <= len(introduced) <= 7):
+        errors.append("initial_report.introduced_units must contain 3-7 ids")
+    if _core_type_count(introduced, unit_type_by_id) < 2:
+        errors.append("initial_report must cover at least two core fact types")
+    imperfection_types = _str_list(report.get("imperfection_types"))
+    if not imperfection_types:
+        errors.append("initial_report.imperfection_types must be non-empty")
+    _validate_unit_refs(
+        errors=errors,
+        field_name="initial_report.noisy_or_imperfect_units",
+        values=report.get("noisy_or_imperfect_units"),
+        exposed_ids=exposed_ids,
+        required=False,
+    )
+    withheld = _validate_unit_refs(
+        errors=errors,
+        field_name="initial_report.withheld_units_for_later",
+        values=report.get("withheld_units_for_later"),
+        exposed_ids=exposed_ids,
+        required=True,
+    )
+    if not set(withheld) - set(introduced):
+        errors.append("initial_report must withhold at least one later source-grounded unit")
+    if len(introduced) >= len(exposed_ids) and len(exposed_ids) > 3:
+        errors.append("initial_report must not introduce every user-exposable fact unit")
+    if not str(report.get("rationale") or "").strip():
+        errors.append("initial_report.rationale is empty")
+    if contains_benchmark_metadata(data):
+        errors.append("initial_report_plan contains benchmark/private metadata")
+    return errors, warnings
+
+
+def validate_noisy_revision_event_plan(data: dict[str, Any], context: dict[str, Any]) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not isinstance(data, dict):
+        return ["noisy_revision_event_plan must be a JSON object"], warnings
+    is_manual, manual_errors = _manual_review_payload(data)
+    if is_manual:
+        return manual_errors, warnings
+    fact_data = context.get("fact_extraction") if isinstance(context.get("fact_extraction"), dict) else {}
+    intent_data = context.get("intent_revision") if isinstance(context.get("intent_revision"), dict) else {}
+    initial_plan = context.get("initial_report_plan") if isinstance(context.get("initial_report_plan"), dict) else {}
+    exposed_ids, unit_type_by_id = _exposed_ids_and_types(fact_data)
     support = intent_data.get("revision_support") if isinstance(intent_data.get("revision_support"), dict) else {}
     revision_ids = set(_str_list(support.get("revision_unit_ids")))
     has_revision = support.get("has_revision_fact") is True
-    revision_bound = False
+    initial_report = initial_plan.get("initial_report") if isinstance(initial_plan.get("initial_report"), dict) else {}
+    initial_units = set(_str_list(initial_report.get("introduced_units")))
+    turns = data.get("turns") if isinstance(data.get("turns"), list) else []
+    if not (3 <= len(turns) <= 6):
+        errors.append("noisy_revision_event_plan.turns must contain 3-6 turns")
     operations: set[str] = set()
+    revision_bound = False
+    wrong_turns: list[tuple[int, str]] = []
+    resolved_wrong_turns: set[str] = set()
     for index, raw in enumerate(turns):
         if not isinstance(raw, dict):
             errors.append(f"turns[{index}] must be an object")
@@ -261,53 +398,103 @@ def validate_dialogue_skeleton(data: dict[str, Any], context: dict[str, Any]) ->
         expected_turn_id = f"T{index + 1}"
         turn_id = str(raw.get("turn_id") or "").strip()
         operation = str(raw.get("operation") or "").strip()
-        introduced = _str_list(raw.get("introduced_units"))
+        introduced = _validate_unit_refs(
+            errors=errors,
+            field_name=f"turns[{index}].introduced_units",
+            values=raw.get("introduced_units"),
+            exposed_ids=exposed_ids,
+            required=index == 0,
+        )
         if turn_id != expected_turn_id:
             errors.append(f"turns[{index}].turn_id must be {expected_turn_id}")
+        if operation in OLD_PROGRESSIVE_OPERATIONS:
+            errors.append(f"turns[{index}].operation uses deprecated progressive operation: {operation}")
         if operation not in ALLOWED_DIALOGUE_OPERATIONS:
             errors.append(f"turns[{index}].operation is invalid: {operation}")
-        if index == 0 and operation != "reveal_vague_goal":
-            errors.append("T1 operation must be reveal_vague_goal")
+        if index == 0 and operation != "initial_imperfect_report":
+            errors.append("T1 operation must be initial_imperfect_report")
+        if index == 0:
+            if not (3 <= len(introduced) <= 7):
+                errors.append("T1 introduced_units must contain 3-7 ids")
+            if initial_units and set(introduced) != initial_units:
+                errors.append("T1 introduced_units must match initial_report_plan.initial_report.introduced_units")
+            if _core_type_count(introduced, unit_type_by_id) < 2:
+                errors.append("T1 must cover at least two core fact types")
+        elif operation == "initial_imperfect_report":
+            errors.append("Only T1 may use initial_imperfect_report")
         operations.add(operation)
-        if not introduced:
-            errors.append(f"turns[{index}].introduced_units must be non-empty")
-        if len(introduced) > 2:
-            errors.append(f"turns[{index}].introduced_units should contain 1-2 ids")
-        for unit_id in introduced:
-            if unit_id not in exposed_ids:
-                errors.append(f"turns[{index}] references unknown or non-exposed unit {unit_id}")
+        claim_status = str(raw.get("claim_status") or "").strip()
+        if claim_status not in CLAIM_STATUSES:
+            errors.append(f"turns[{index}].claim_status is invalid: {claim_status}")
+        revises_units = _validate_unit_refs(
+            errors=errors,
+            field_name=f"turns[{index}].revises_units",
+            values=raw.get("revises_units"),
+            exposed_ids=exposed_ids,
+            required=False,
+        )
+        has_lifecycle_payload = bool(
+            introduced
+            or revises_units
+            or _str_list(raw.get("deactivates_claims"))
+            or _str_list(raw.get("activates_claims"))
+        )
+        if index > 0 and not has_lifecycle_payload and operation != "confirm_final_active_intent":
+            errors.append(f"turns[{index}] must introduce, revise, deactivate, or activate at least one source-grounded claim")
         if "user_utterance" in raw:
             errors.append(f"turns[{index}] must not include user_utterance")
         if "intent_delta" in raw:
             errors.append(f"turns[{index}] must not include intent_delta")
-        if operation in REVISION_OPERATIONS:
+        for list_field in ["revises_turns", "deactivates_claims", "activates_claims", "active_after_turn", "inactive_after_turn"]:
+            if list_field in raw and not isinstance(raw.get(list_field), list):
+                errors.append(f"turns[{index}].{list_field} must be a list")
+        if operation in REVISION_OPERATIONS or claim_status in {"correction", "retraction", "replacement"}:
             if not has_revision:
                 errors.append(f"turns[{index}] uses revision operation without supported revision fact")
-            if not (set(introduced) & revision_ids):
-                errors.append(f"turns[{index}] revision operation must bind revision_support.revision_unit_ids")
-            else:
+            if not (set(introduced) | set(revises_units)):
+                errors.append(f"turns[{index}] revision operation must bind source fact units")
+            elif (set(introduced) | set(revises_units)) & revision_ids:
                 revision_bound = True
+        if operation in {"speculative_hypothesis", "mistaken_clarification", "incorrect_reproduction_detail"} or claim_status in {"speculative", "mistaken"}:
+            wrong_turns.append((index, turn_id))
+        if index > 0 and operation in RESOLUTION_OPERATIONS:
+            for revised_turn in _str_list(raw.get("revises_turns")):
+                resolved_wrong_turns.add(revised_turn)
+            if raw.get("deactivates_claims") or raw.get("activates_claims"):
+                for wrong_index, wrong_turn_id in wrong_turns:
+                    if wrong_index < index:
+                        resolved_wrong_turns.add(wrong_turn_id)
+        must_resolve = raw.get("must_be_resolved_later")
+        if index == len(turns) - 1 and must_resolve not in (False, [], None, ""):
+            errors.append("final turn must not leave must_be_resolved_later unresolved")
+    if not (operations & NON_MONOTONIC_OPERATIONS):
+        errors.append("noisy_revision_event_plan must include at least one noisy/non-monotonic refinement operation")
+    unresolved = [turn_id for _, turn_id in wrong_turns if turn_id not in resolved_wrong_turns]
+    if unresolved:
+        errors.append(f"wrong or speculative turns are unresolved: {', '.join(unresolved)}")
     if has_revision and not (operations & REVISION_OPERATIONS):
-        errors.append("dialogue_skeleton must include at least one real revision operation")
+        errors.append("noisy_revision_event_plan must include at least one revision/final-active operation")
     if has_revision and not revision_bound:
-        errors.append("dialogue_skeleton revision operation is not bound to revision_support")
+        warnings.append("noisy_revision_event_plan revision operation is not bound to revision_support")
+    if contains_benchmark_metadata(data):
+        errors.append("noisy_revision_event_plan contains benchmark/private metadata")
     return errors, warnings
 
 
-def validate_utterance_realization(data: dict[str, Any], context: dict[str, Any]) -> tuple[list[str], list[str]]:
+def validate_realistic_utterance_realization(data: dict[str, Any], context: dict[str, Any]) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     if not isinstance(data, dict):
-        return ["utterance_realization must be a JSON object"], warnings
-    skeleton = context.get("dialogue_skeleton") if isinstance(context.get("dialogue_skeleton"), dict) else {}
+        return ["realistic_utterance_realization must be a JSON object"], warnings
+    event_plan = context.get("noisy_revision_event_plan") if isinstance(context.get("noisy_revision_event_plan"), dict) else {}
     fact_data = context.get("fact_extraction") if isinstance(context.get("fact_extraction"), dict) else {}
     unit_by_id = _unit_by_id(fact_data)
-    skeleton_turns = skeleton.get("turns") if isinstance(skeleton.get("turns"), list) else []
-    expected_ids = [str(turn.get("turn_id")) for turn in skeleton_turns if isinstance(turn, dict)]
-    turn_by_id = {str(turn.get("turn_id")): turn for turn in skeleton_turns if isinstance(turn, dict)}
+    event_turns = event_plan.get("turns") if isinstance(event_plan.get("turns"), list) else []
+    expected_ids = [str(turn.get("turn_id")) for turn in event_turns if isinstance(turn, dict)]
+    turn_by_id = {str(turn.get("turn_id")): turn for turn in event_turns if isinstance(turn, dict)}
     utterances = data.get("utterances") if isinstance(data.get("utterances"), list) else []
     if len(utterances) != len(expected_ids):
-        errors.append("utterance_realization must contain one utterance per skeleton turn")
+        errors.append("realistic_utterance_realization must contain one utterance per event-plan turn")
     seen: set[str] = set()
     for index, raw in enumerate(utterances):
         if not isinstance(raw, dict):
@@ -323,30 +510,28 @@ def validate_utterance_realization(data: dict[str, Any], context: dict[str, Any]
         if not text:
             errors.append(f"utterances[{index}].user_utterance is empty")
         if index == 0:
-            if len(text) > 90:
-                errors.append("T1 must be <= 90 chars")
+            if not (120 <= len(text) <= 900):
+                errors.append("T1 must be a realistic initial issue report of 120-900 chars")
             if (
-                SNAKE_CASE_IDENTIFIER_RE.search(text)
-                or CODE_LIKE_RE.search(text)
-                or re.search(r"\b(patch|fix|should|test|gold|oracle)\b", text, re.IGNORECASE)
+                re.search(r"\b(patch|diff|tests?|gold|oracle|reference patch|hidden test)\b", text, re.IGNORECASE)
                 or GENERIC_T1_RE.search(text)
             ):
-                errors.append("T1 must be vague, specific, and free of code-like identifiers or benchmark wording")
+                errors.append("T1 must be an imperfect issue report without benchmark/private wording")
         if TEMPLATE_ARTIFACT_RE.search(text):
             errors.append(f"utterances[{index}] contains template artifact wording")
         if FORBIDDEN_USER_TERMS_RE.search(text) or IMPLEMENTATION_HINT_RE.search(text):
             errors.append(f"utterances[{index}] leaks forbidden implementation/benchmark text")
         turn = turn_by_id.get(turn_id) if isinstance(turn_by_id.get(turn_id), dict) else {}
-        if str(turn.get("operation") or "") == "confirm" and len(text) > 120:
-            errors.append(f"utterances[{index}] confirm turn is too verbose")
+        if str(turn.get("operation") or "") == "confirm_final_active_intent" and len(text) > 420:
+            warnings.append(f"utterances[{index}] final confirmation turn is verbose")
         introduced = _str_list(turn.get("introduced_units"))
         if introduced and not any(_token_overlap(text, unit_by_id.get(unit_id, {}).get("text", "")) > 0 for unit_id in introduced):
             errors.append(f"utterances[{index}] does not align with introduced_units")
     missing = set(expected_ids) - seen
     if missing:
-        errors.append(f"utterance_realization is missing turn ids: {', '.join(sorted(missing))}")
+        errors.append(f"realistic_utterance_realization is missing turn ids: {', '.join(sorted(missing))}")
     if contains_benchmark_metadata(data):
-        errors.append("utterance_realization contains benchmark/private metadata")
+        errors.append("realistic_utterance_realization contains benchmark/private metadata")
     return errors, warnings
 
 
@@ -358,25 +543,51 @@ def validate_semantic_reviewer(data: dict[str, Any], context: dict[str, Any]) ->
     decision = str(data.get("decision") or "").strip()
     if decision not in {"accept", "manual_review_required", "reject"}:
         errors.append(f"semantic_reviewer.decision is invalid: {decision}")
-    if not isinstance(data.get("semantic_equivalence"), bool):
-        errors.append("semantic_reviewer.semantic_equivalence must be boolean")
-    if not isinstance(data.get("revision_is_real"), bool):
-        errors.append("semantic_reviewer.revision_is_real must be boolean")
-    if str(data.get("dialogue_naturalness") or "") not in {"pass", "weak", "fail"}:
-        errors.append("semantic_reviewer.dialogue_naturalness is invalid")
+    for key in ["scenario_fit", "initial_report_quality", "noisy_refinement_quality"]:
+        if str(data.get(key) or "") not in {"pass", "weak", "fail"}:
+            errors.append(f"semantic_reviewer.{key} is invalid")
+    for key in [
+        "has_non_monotonic_claim_evolution",
+        "wrong_or_speculative_claims_resolved",
+        "old_progressive_disclosure_pattern",
+        "final_intent_consistent",
+        "revision_grounded",
+    ]:
+        if not isinstance(data.get(key), bool):
+            errors.append(f"semantic_reviewer.{key} must be boolean")
     if str(data.get("leakage_risk") or "") not in {"low", "medium", "high"}:
         errors.append("semantic_reviewer.leakage_risk is invalid")
     if not isinstance(data.get("issues"), list):
         errors.append("semantic_reviewer.issues must be a list")
     if not isinstance(data.get("required_fixes"), list):
         errors.append("semantic_reviewer.required_fixes must be a list")
+    if "unresolved_wrong_claims" in data:
+        try:
+            unresolved_wrong_claims = int(data.get("unresolved_wrong_claims") or 0)
+        except (TypeError, ValueError):
+            errors.append("semantic_reviewer.unresolved_wrong_claims must be an integer")
+            unresolved_wrong_claims = 1
+    else:
+        unresolved_wrong_claims = 0
     if decision == "accept":
-        if data.get("semantic_equivalence") is not True:
-            errors.append("semantic_reviewer accepted without semantic_equivalence=true")
-        if data.get("revision_is_real") is not True:
-            errors.append("semantic_reviewer accepted without revision_is_real=true")
-        if str(data.get("dialogue_naturalness")) == "fail":
-            errors.append("semantic_reviewer accepted failing dialogue_naturalness")
+        if str(data.get("scenario_fit")) != "pass":
+            errors.append("semantic_reviewer accepted without scenario_fit=pass")
+        if str(data.get("initial_report_quality")) == "fail":
+            errors.append("semantic_reviewer accepted failing initial_report_quality")
+        if str(data.get("noisy_refinement_quality")) == "fail":
+            errors.append("semantic_reviewer accepted failing noisy_refinement_quality")
+        if data.get("has_non_monotonic_claim_evolution") is not True:
+            errors.append("semantic_reviewer accepted without non-monotonic claim evolution")
+        if data.get("wrong_or_speculative_claims_resolved") is not True:
+            errors.append("semantic_reviewer accepted with unresolved wrong/speculative claims")
+        if unresolved_wrong_claims != 0:
+            errors.append("semantic_reviewer accepted with unresolved_wrong_claims != 0")
+        if data.get("old_progressive_disclosure_pattern") is not False:
+            errors.append("semantic_reviewer accepted old progressive disclosure pattern")
+        if data.get("final_intent_consistent") is not True:
+            errors.append("semantic_reviewer accepted without final_intent_consistent=true")
+        if data.get("revision_grounded") is not True:
+            errors.append("semantic_reviewer accepted without revision_grounded=true")
         if str(data.get("leakage_risk")) != "low":
             errors.append("semantic_reviewer accepted non-low leakage_risk")
     return errors, warnings
@@ -385,7 +596,8 @@ def validate_semantic_reviewer(data: dict[str, Any], context: dict[str, Any]) ->
 VALIDATORS = {
     "fact_extraction": validate_fact_extraction,
     "intent_revision": validate_intent_revision,
-    "dialogue_skeleton": validate_dialogue_skeleton,
-    "utterance_realization": validate_utterance_realization,
+    "initial_report_plan": validate_initial_report_plan,
+    "noisy_revision_event_plan": validate_noisy_revision_event_plan,
+    "realistic_utterance_realization": validate_realistic_utterance_realization,
     "semantic_reviewer": validate_semantic_reviewer,
 }

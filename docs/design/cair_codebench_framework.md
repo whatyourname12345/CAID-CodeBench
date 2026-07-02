@@ -1,10 +1,11 @@
 # CAIR-CodeBench Framework
 
-This is a legacy framework note. For the current CAIR v2 data-construction
-contract, use `docs/cair_pipeline_v2_minimal_robust.md`. In v2, SWE-bench is
-raw corpus only; final CAIR data must come from suitability-screened subsets,
-and agent-view exports must not expose oracle fields, localization gold,
-reference patches, hidden tests, or SWE-bench test-list metadata.
+This is a legacy framework note. The current CAIR v2 data-construction path is
+the staged-LLM pipeline under `cair_v2/staged/` and `cair_v2/batch/`. In v2,
+SWE-bench is raw corpus only; final CAIR data must come from
+suitability-screened subsets, and agent-view exports must not expose oracle
+fields, localization gold, reference patches, hidden tests, or SWE-bench
+test-list metadata.
 
 CAIR-CodeBench keeps SWE-bench's executable patch validation as the final correctness signal and adds an interaction layer around it.
 

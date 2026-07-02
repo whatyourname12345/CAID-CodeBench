@@ -10,7 +10,7 @@ from cair_v2.llm.json_utils import ParsedModelOutput, parse_model_output, to_yam
 
 
 SYSTEM_PROMPT = """You construct CAIR-CodeBench instances.
-CAIR is intent-revision sharding, not ordinary multi-turn issue splitting.
+CAIR v2 staged construction is realistic noisy multi-turn issue refinement, not progressive disclosure or ordinary issue splitting.
 Return only strict JSON or YAML matching the requested schema.
 Never reveal API keys, reference patch code, hidden tests, or implementation diffs."""
 

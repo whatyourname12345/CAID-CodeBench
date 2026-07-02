@@ -14,15 +14,30 @@ from cair_v2.construction.sanitizer import SanitizerResult, sanitize_compact_ins
 
 
 REVISION_OPERATIONS = {
-    "correct",
-    "reverse",
-    "retract",
-    "override",
-    "obsolete",
-    "discard",
-    "introduce_conflict",
+    "correct_previous_claim",
+    "retract_previous_claim",
+    "replace_previous_claim",
     "resolve_conflict",
-    "reject",
+    "narrow_scope",
+    "broaden_scope",
+    "add_regression_constraint",
+    "confirm_final_active_intent",
+}
+
+SPECULATIVE_OPERATIONS = {
+    "speculative_hypothesis",
+    "mistaken_clarification",
+    "incorrect_reproduction_detail",
+}
+
+ACTIVE_OPERATIONS = {
+    "initial_imperfect_report",
+    "add_detail",
+    "add_missing_detail",
+    "add_reproduction_detail",
+    "narrow_scope",
+    "broaden_scope",
+    "confirm_final_active_intent",
 }
 
 ACTIVE_UNIT_TYPES = {
@@ -68,7 +83,7 @@ def _str_list(value: Any) -> list[str]:
     return result
 
 
-def _sparse_delta(delta: dict[str, list[str]]) -> dict[str, list[str]]:
+def _sparse_delta(delta: dict[str, Any]) -> dict[str, Any]:
     return {key: values for key, values in delta.items() if isinstance(values, list) and values}
 
 
@@ -162,39 +177,64 @@ def _public_unit_text(text: str) -> str:
     return cleaned
 
 
-def compile_state_delta(turn: dict[str, Any], introduced: list[dict[str, Any]], final_intent: dict[str, Any]) -> dict[str, list[str]]:
+def compile_state_delta(turn: dict[str, Any], introduced: list[dict[str, Any]], final_intent: dict[str, Any]) -> dict[str, Any]:
     operation = str(turn.get("operation") or "")
-    intent_delta = str(turn.get("intent_delta") or "").strip()
-    delta: dict[str, list[str]] = {
+    claim_status = str(turn.get("claim_status") or "")
+    explicit_deactivates = _str_list(turn.get("deactivates_claims"))
+    explicit_activates = _str_list(turn.get("activates_claims"))
+    delta: dict[str, Any] = {
         "add_active_goals": [],
         "add_constraints": [],
-        "add_obsolete_goals": [],
+        "add_regression_expectations": [],
         "add_forbidden_actions": [],
+        "deactivate_goals": [],
+        "deactivate_assumptions": [],
+        "replace_assumptions": [],
+        "mark_claims_speculative": [],
+        "mark_claims_mistaken": [],
         "resolve_conflicts": [],
     }
-    if operation in REVISION_OPERATIONS:
-        obsolete = _unit_texts(introduced, OBSOLETE_UNIT_TYPES)
-        constraints = _unit_texts(introduced, {"negative_constraint", "regression_expectation", "conflict_or_tension", "ambiguity_or_correction"})
-        if obsolete:
-            delta["add_obsolete_goals"] = obsolete
-        if constraints:
-            delta["add_constraints"] = constraints
-        if not obsolete and not constraints and intent_delta:
-            delta["add_obsolete_goals"] = [intent_delta]
-    elif operation in {"add_regression_constraint", "add_negative_constraint", "override"}:
-        delta["add_constraints"] = _unit_texts(
-            introduced,
-            {"regression_expectation", "negative_constraint", "active_constraint", "boundary_case"},
-        ) or ([intent_delta] if intent_delta else [])
+    active_texts = _unit_texts(introduced, ACTIVE_UNIT_TYPES)
+    obsolete_texts = _unit_texts(introduced, OBSOLETE_UNIT_TYPES)
+    constraint_texts = _unit_texts(introduced, {"active_constraint", "negative_constraint", "conflict_or_tension", "ambiguity_or_correction"})
+    regression_texts = _unit_texts(introduced, {"regression_expectation"})
+
+    if operation in ACTIVE_OPERATIONS:
+        delta["add_active_goals"] = active_texts
+    if operation == "add_regression_constraint":
+        delta["add_regression_expectations"] = regression_texts or active_texts
+        delta["add_constraints"] = constraint_texts
+    if operation in {"speculative_hypothesis"} or claim_status == "speculative":
+        delta["mark_claims_speculative"] = active_texts or explicit_activates
+    if operation in {"mistaken_clarification", "incorrect_reproduction_detail"} or claim_status == "mistaken":
+        delta["mark_claims_mistaken"] = active_texts or explicit_activates
+    if operation in {"correct_previous_claim", "retract_previous_claim", "replace_previous_claim"}:
+        delta["deactivate_assumptions"] = explicit_deactivates or obsolete_texts or constraint_texts
+        delta["add_active_goals"] = explicit_activates or active_texts
+        if operation == "replace_previous_claim" and (delta["deactivate_assumptions"] or delta["add_active_goals"]):
+            old_values = delta["deactivate_assumptions"] or ["previous claim"]
+            new_values = delta["add_active_goals"] or explicit_activates or ["corrected claim"]
+            delta["replace_assumptions"] = [
+                {
+                    "old": old_values[0],
+                    "new": new_values[0],
+                    "reason": "User replaced an earlier claim during issue refinement.",
+                }
+            ]
     elif operation == "resolve_conflict":
-        delta["resolve_conflicts"] = [intent_delta] if intent_delta else []
-    elif operation == "confirm":
-        # Keep confirm turns light. Only add the final objective if no explicit unit was introduced.
-        active = _unit_texts(introduced, {"expected_behavior", "acceptance_signal"})
-        delta["add_active_goals"] = active[:2]
-    else:
-        delta["add_active_goals"] = _unit_texts(introduced, ACTIVE_UNIT_TYPES) or ([intent_delta] if intent_delta else [])
-    if operation == "confirm" and not any(delta.values()):
+        delta["resolve_conflicts"] = explicit_deactivates + explicit_activates or constraint_texts
+        delta["deactivate_assumptions"] = explicit_deactivates or obsolete_texts
+        delta["add_active_goals"] = explicit_activates or active_texts
+    if operation == "narrow_scope":
+        delta["add_constraints"] = constraint_texts or active_texts
+        delta["deactivate_goals"] = explicit_deactivates
+    if operation == "broaden_scope":
+        delta["add_active_goals"] = explicit_activates or active_texts
+    if "negative_constraint" in {str(unit.get("type") or "") for unit in introduced}:
+        delta["add_forbidden_actions"] = _unit_texts(introduced, {"negative_constraint"})
+    if obsolete_texts and operation not in {"correct_previous_claim", "retract_previous_claim", "replace_previous_claim", "resolve_conflict"}:
+        delta["deactivate_assumptions"] = obsolete_texts
+    if operation == "confirm_final_active_intent" and not any(delta.values()):
         objective = str(final_intent.get("objective") or "").strip()
         if objective:
             delta["add_active_goals"] = [objective]
@@ -216,6 +256,11 @@ def compile_dialogue_turns(capsule: dict[str, Any], dialogue_plan: dict[str, Any
             "operation": str(raw.get("operation") or ""),
             "user_utterance": str(raw.get("user_utterance") or "").strip(),
             "introduced_units": introduced_ids,
+            "claim_status": str(raw.get("claim_status") or "").strip(),
+            "revises_turns": _str_list(raw.get("revises_turns")),
+            "revises_units": _str_list(raw.get("revises_units")),
+            "deactivates_claims": _str_list(raw.get("deactivates_claims")),
+            "activates_claims": _str_list(raw.get("activates_claims")),
             "state_delta": compile_state_delta(raw, introduced, final_intent),
         }
         compiled.append(turn)
@@ -241,8 +286,9 @@ def build_final_issue_prompt(final_intent: dict[str, Any]) -> str:
 
 def build_concat_dialogue_prompt(turns: list[dict[str, Any]], final_intent: dict[str, Any]) -> str:
     lines = [
-        "The user provided these messages over time. Infer only the final active intent.",
-        "Rejected, obsolete, or non-goal information is inactive and must not be implemented as a requirement.",
+        "The user may add, revise, contradict, retract, or correct earlier claims.",
+        "Infer the final active intent from the whole conversation.",
+        "Do not implement withdrawn, obsolete, unresolved speculative, mistaken, or rejected assumptions.",
         "",
     ]
     for turn in turns:
@@ -256,7 +302,8 @@ def build_concat_dialogue_prompt(turns: list[dict[str, Any]], final_intent: dict
 
 def build_recap_prompt(final_intent: dict[str, Any]) -> str:
     lines = [
-        "Before implementing, recap the final active intent and separate inactive context.",
+        "Before implementing, recap the final active claims and separate withdrawn, mistaken, or speculative claims.",
+        "Only implement the final active intent; do not implement intermediate guesses that were withdrawn or left unresolved.",
         "",
         "Active objective:",
         str(final_intent.get("objective") or ""),
@@ -353,6 +400,7 @@ def build_cair_instance_v2(
     localization_gold: LocalizationGold | None = None,
     pipeline_version: str = "v2_minimal_robust",
     model_config_summary: dict[str, Any] | None = None,
+    semantic_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_record = read_json(instance_dir / "source_record.json")
     final_intent = normalize_final_intent(semantic_capsule)
@@ -362,6 +410,8 @@ def build_cair_instance_v2(
     localization_gold = localization_gold or extract_localization_gold(instance_dir)
     localization_checkpoint = build_localization_checkpoint(localization_gold)
     evaluation_modes = build_evaluation_modes(turns, final_intent, oracle, localization_checkpoint["prompt"])
+    review = semantic_review if isinstance(semantic_review, dict) else {}
+    is_noisy = pipeline_version == "v2_noisy_refinement"
     compact = {
         "instance_id": source_record.get("instance_id"),
         "repo": source_record.get("repo"),
@@ -378,6 +428,10 @@ def build_cair_instance_v2(
         "oracle": oracle,
         "metadata": {
             "pipeline_version": pipeline_version,
+            "dialogue_scenario": "noisy_issue_refinement" if is_noisy else "deprecated_minimal_robust",
+            "old_progressive_disclosure_pattern": bool(review.get("old_progressive_disclosure_pattern", False)),
+            "unresolved_wrong_claims": int(review.get("unresolved_wrong_claims", 0) or 0),
+            "scenario_fit": str(review.get("scenario_fit") or ("pass" if is_noisy else "deprecated")),
             "generator_model": generator_model,
             "critical_model": critical_model,
             "reviewer_model": reviewer_model,

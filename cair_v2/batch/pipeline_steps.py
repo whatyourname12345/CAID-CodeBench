@@ -18,8 +18,9 @@ def staged_step_configs(
     return {
         "fact_extraction": StepConfig(model=model_generator, params=dict(llm_params.get("fact_extraction") or {})),
         "intent_revision": StepConfig(model=model_critical, params=dict(llm_params.get("intent_revision") or {})),
-        "dialogue_skeleton": StepConfig(model=model_generator, params=dict(llm_params.get("dialogue_skeleton") or {})),
-        "utterance_realization": StepConfig(model=model_generator, params=dict(llm_params.get("utterance_realization") or {})),
+        "initial_report_plan": StepConfig(model=model_generator, params=dict(llm_params.get("initial_report_plan") or {})),
+        "noisy_revision_event_plan": StepConfig(model=model_generator, params=dict(llm_params.get("noisy_revision_event_plan") or {})),
+        "realistic_utterance_realization": StepConfig(model=model_generator, params=dict(llm_params.get("realistic_utterance_realization") or {})),
         "semantic_reviewer": StepConfig(model=model_critical, params=dict(llm_params.get("semantic_reviewer") or {})),
         "json_repair": StepConfig(model=model_generator, params=dict(llm_params.get("json_repair") or {})),
     }
@@ -64,4 +65,3 @@ def deepseek_client_factory(*, no_api: bool, dry_run: bool, client_max_retries: 
         return DeepSeekClient(model=model, max_retries=client_max_retries, timeout=client_timeout)
 
     return factory
-

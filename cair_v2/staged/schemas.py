@@ -35,40 +35,39 @@ REVISION_FACT_TYPES = {
 }
 
 REVISION_OPERATIONS = {
-    "correct",
-    "reverse",
-    "retract",
-    "override",
-    "obsolete",
-    "discard",
-    "introduce_conflict",
+    "correct_previous_claim",
+    "retract_previous_claim",
+    "replace_previous_claim",
     "resolve_conflict",
-    "reject",
+    "narrow_scope",
+    "broaden_scope",
+    "add_regression_constraint",
 }
 
 ALLOWED_DIALOGUE_OPERATIONS = {
-    "reveal_vague_goal",
-    "add_information",
-    "refine",
-    "correct",
-    "reverse",
-    "retract",
-    "override",
-    "obsolete",
-    "discard",
-    "introduce_conflict",
+    "initial_imperfect_report",
+    "add_detail",
+    "speculative_hypothesis",
+    "mistaken_clarification",
+    "incorrect_reproduction_detail",
+    "correct_previous_claim",
+    "retract_previous_claim",
+    "replace_previous_claim",
     "resolve_conflict",
-    "reject",
+    "narrow_scope",
+    "broaden_scope",
+    "add_missing_detail",
+    "add_reproduction_detail",
     "add_regression_constraint",
-    "add_negative_constraint",
-    "confirm",
+    "confirm_final_active_intent",
 }
 
 STAGED_STEPS = [
     "fact_extraction",
     "intent_revision",
-    "dialogue_skeleton",
-    "utterance_realization",
+    "initial_report_plan",
+    "noisy_revision_event_plan",
+    "realistic_utterance_realization",
     "semantic_reviewer",
 ]
 
@@ -159,4 +158,3 @@ class StagedConstructionResult:
     @property
     def api_calls_made(self) -> int:
         return sum(result.api_calls_made for result in self.step_results.values())
-

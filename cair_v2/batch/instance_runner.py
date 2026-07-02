@@ -45,7 +45,7 @@ class BatchV2Options:
     include_rejected: bool = False
     optional_reviewer: bool = False
     dialogue_strategy: str = "monolithic"
-    mode: str = "minimal-robust"
+    mode: str = "staged-llm"
     llm_params: dict[str, Any] | None = None
 
 
@@ -84,6 +84,9 @@ def create_or_load_instance_v2(record: dict[str, Any], output_dir: Path, *, forc
             ".build/intent_revision.json",
             ".build/dialogue_skeleton.json",
             ".build/utterance_realization.json",
+            ".build/initial_report_plan.json",
+            ".build/noisy_revision_event_plan.json",
+            ".build/realistic_utterance_realization.json",
             ".build/semantic_reviewer.json",
             ".build/semantic_review.json",
             ".build/intermediate_debug.json",
@@ -278,6 +281,7 @@ def finalize_v2(
     options: BatchV2Options,
     pipeline_version: str = "v2_minimal_robust",
     model_config: dict[str, Any] | None = None,
+    semantic_review: dict[str, Any] | None = None,
 ) -> str:
     pre_status = "accepted_with_template_dialogue" if dialogue_source == "template" else "accepted"
     compact = build_cair_instance_v2(
@@ -292,8 +296,10 @@ def finalize_v2(
         dialogue_source=dialogue_source,
         pipeline_version=pipeline_version,
         model_config_summary=model_config,
+        semantic_review=semantic_review,
     )
     quality = evaluate_v2_quality(compact=compact, semantic_capsule=capsule, dialogue_plan=dialogue_plan)
+    noisy_quality = quality.get("noisy_refinement") if isinstance(quality.get("noisy_refinement"), dict) else {}
     if quality.get("passed"):
         status = pre_status
     else:
@@ -302,6 +308,10 @@ def finalize_v2(
             status = "manual_review_required"
     compact.setdefault("metadata", {})["construction_status"] = status
     compact["metadata"]["quality_gate_passed"] = bool(quality.get("passed"))
+    if noisy_quality:
+        compact["metadata"]["old_progressive_disclosure_pattern"] = bool(noisy_quality.get("old_progressive_disclosure_pattern"))
+        compact["metadata"]["unresolved_wrong_claims"] = int(noisy_quality.get("unresolved_wrong_claims") or 0)
+        compact["metadata"]["scenario_fit"] = str(noisy_quality.get("scenario_fit") or compact["metadata"].get("scenario_fit") or "")
     write_v2_outputs(instance_dir, compact, quality)
     cache_dir = instance_dir / ".llm_cache"
     if cache_dir.exists():
@@ -355,16 +365,22 @@ def _staged_nonaccepted_outputs(
         construction_status=staged_status,
         quality_gate_passed=False,
         dialogue_source=dialogue_source,
-        pipeline_version="v2_staged_llm",
+        pipeline_version="v2_noisy_refinement",
         model_config_summary=model_config,
+        semantic_review=semantic_review,
     )
     quality = evaluate_v2_quality(compact=compact, semantic_capsule=capsule, dialogue_plan=dialogue_plan)
+    noisy_quality = quality.get("noisy_refinement") if isinstance(quality.get("noisy_refinement"), dict) else {}
     quality["semantic_review"] = semantic_review
     quality["passed"] = False
     quality["status"] = staged_status
     quality.setdefault("hard_failures", []).append(f"semantic_reviewer decision: {staged_status}")
     compact.setdefault("metadata", {})["construction_status"] = staged_status
     compact["metadata"]["quality_gate_passed"] = False
+    if noisy_quality:
+        compact["metadata"]["old_progressive_disclosure_pattern"] = bool(noisy_quality.get("old_progressive_disclosure_pattern"))
+        compact["metadata"]["unresolved_wrong_claims"] = int(noisy_quality.get("unresolved_wrong_claims") or 0)
+        compact["metadata"]["scenario_fit"] = str(noisy_quality.get("scenario_fit") or compact["metadata"].get("scenario_fit") or "")
     write_v2_outputs(instance_dir, compact, quality)
     summary = "; ".join(quality.get("hard_failures", []) + quality.get("soft_warnings", []))
     state.update_instance(
@@ -384,6 +400,83 @@ def _staged_nonaccepted_outputs(
         function_gold_available=quality.get("localization", {}).get("function_gold_available"),
         last_error=summary,
         failure_reason="semantic_reviewer",
+    )
+    state.save()
+
+
+def _manual_review_reason(errors: list[str]) -> str:
+    text = "; ".join(errors).lower()
+    if "no_withheld_units_for_later_refinement" in text:
+        return "no_withheld_units_for_later_refinement"
+    if "would_degenerate_into_progressive_disclosure" in text:
+        return "would_degenerate_into_progressive_disclosure"
+    if "no source-grounded revision fact" in text:
+        return "insufficient_source_facts_for_noisy_refinement"
+    if "insufficient_source_facts_for_noisy_refinement" in text:
+        return "insufficient_source_facts_for_noisy_refinement"
+    return "insufficient_source_facts_for_noisy_refinement"
+
+
+def _broad_manual_failure_reason(manual_reason: str) -> str:
+    if manual_reason in {
+        "no_withheld_units_for_later_refinement",
+        "would_degenerate_into_progressive_disclosure",
+        "insufficient_source_facts_for_noisy_refinement",
+    }:
+        return "insufficient_source_facts_for_noisy_refinement"
+    return manual_reason
+
+
+def _write_staged_manual_review_report(
+    *,
+    instance_dir: Path,
+    instance_id: str,
+    result,
+    state: BatchState,
+    manual_reason: str,
+) -> None:
+    broad_reason = _broad_manual_failure_reason(manual_reason)
+    report = {
+        "passed": False,
+        "status": "manual_review_required",
+        "failed_stage": result.failed_step,
+        "review_stage": result.failed_step,
+        "failure_reason": broad_reason,
+        "manual_review_reason": manual_reason,
+        "hard_failures": [],
+        "soft_warnings": list(result.errors or []),
+        "checks": {
+            "old_progressive_disclosure_pattern": "not_generated",
+            "unresolved_wrong_claims": "not_applicable",
+            "quality_gate_runtime": "not_run",
+        },
+        "noisy_refinement": {
+            "old_progressive_disclosure_pattern": "not_generated",
+            "unresolved_wrong_claims": "not_applicable",
+            "scenario_fit": "not_generated",
+        },
+        "recommended_action": "manual_review",
+    }
+    write_json(instance_dir / "quality_report.json", report)
+    write_intermediate_debug(instance_dir, {"quality_gate_v2": report})
+    state.update_instance(
+        instance_id,
+        status="manual_review_required",
+        current_step=result.failed_step or "staged_pipeline",
+        failed_stage=result.failed_step,
+        review_stage=result.failed_step,
+        semantic_capsule="pass" if result.semantic_capsule else "fail",
+        dialogue_plan="manual_review_required",
+        dialogue_plan_llm_success=False,
+        dialogue_plan_template_fallback_used=False,
+        quality_gate="not_run",
+        release_candidate=False,
+        last_error=manual_reason,
+        failure_reason=broad_reason,
+        manual_review_reason=manual_reason,
+        old_progressive_disclosure_pattern="not_generated",
+        unresolved_wrong_claims="not_applicable",
+        suggested_fix="Inspect staged .build/*.json; source facts may not support noisy refinement.",
     )
     state.save()
 
@@ -484,8 +577,9 @@ def run_one_instance_staged_v2(
             dialogue_source="llm_staged",
             state=state,
             options=options,
-            pipeline_version="v2_staged_llm",
+            pipeline_version="v2_noisy_refinement",
             model_config=config_summary,
+            semantic_review=result.semantic_review,
         )
         if status not in {"accepted", "accepted_with_template_dialogue"}:
             state.update_instance(instance_id, suggested_fix="Inspect staged .build/*.json and quality_report.json.")
@@ -501,7 +595,7 @@ def run_one_instance_staged_v2(
             "Staged dialogue failed after targeted retry; using final template fallback",
         )
         plan_result = _template_dialogue_result(instance_dir, result.semantic_capsule)
-        state.record_llm_step(instance_id, result.failed_step or "utterance_realization", fallback_used=True)
+        state.record_llm_step(instance_id, result.failed_step or "realistic_utterance_realization", fallback_used=True)
         state.update_instance(
             instance_id,
             dialogue_plan_template_fallback_used=True,
@@ -528,7 +622,7 @@ def run_one_instance_staged_v2(
                 dialogue_source="template",
                 state=state,
                 options=options,
-                pipeline_version="v2_staged_llm",
+                pipeline_version="v2_noisy_refinement",
                 model_config=config_summary,
             )
             if status not in {"accepted", "accepted_with_template_dialogue"}:
@@ -549,6 +643,17 @@ def run_one_instance_staged_v2(
             state=state,
             options=options,
             model_config=config_summary,
+        )
+        return
+
+    if result.status == "manual_review_required":
+        manual_reason = _manual_review_reason(result.errors)
+        _write_staged_manual_review_report(
+            instance_dir=instance_dir,
+            instance_id=instance_id,
+            result=result,
+            state=state,
+            manual_reason=manual_reason,
         )
         return
 

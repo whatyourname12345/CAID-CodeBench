@@ -5,7 +5,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from cair_v2.construction.dialogue_plan import ALLOWED_DIALOGUE_OPERATIONS, REVISION_OPERATIONS
 from cair_v2.construction.semantic_capsule import REVISION_FACT_TYPES
 from cair_v2.construction.instance_io import read_json
 from cair_v2.construction.sanitizer import (
@@ -16,6 +15,7 @@ from cair_v2.construction.sanitizer import (
     text_blob,
 )
 from cair_v2.construction.views import agent_view_payload
+from cair_v2.staged.schemas import ALLOWED_DIALOGUE_OPERATIONS, REVISION_OPERATIONS
 
 
 REQUIRED_EVALUATION_KEYS = {
@@ -70,6 +70,42 @@ AGENT_VIEW_FORBIDDEN_TEXT_RE = re.compile(
 )
 
 REVISION_SUPPORT_TYPES = set(REVISION_FACT_TYPES)
+OLD_PROGRESSIVE_OPERATIONS = {"reveal_vague_goal", "refine", "add_information", "correct"}
+NON_MONOTONIC_OPERATIONS = {
+    "speculative_hypothesis",
+    "mistaken_clarification",
+    "incorrect_reproduction_detail",
+    "correct_previous_claim",
+    "retract_previous_claim",
+    "replace_previous_claim",
+    "resolve_conflict",
+    "narrow_scope",
+    "broaden_scope",
+    "add_regression_constraint",
+    "confirm_final_active_intent",
+}
+WRONG_OR_SPECULATIVE_OPERATIONS = {
+    "speculative_hypothesis",
+    "mistaken_clarification",
+    "incorrect_reproduction_detail",
+}
+RESOLUTION_OPERATIONS = {
+    "correct_previous_claim",
+    "retract_previous_claim",
+    "replace_previous_claim",
+    "resolve_conflict",
+    "narrow_scope",
+    "broaden_scope",
+    "confirm_final_active_intent",
+}
+CORE_INITIAL_FACT_TYPES = {
+    "symptom",
+    "observed_behavior",
+    "expected_behavior",
+    "reproduction",
+    "ambiguity_or_correction",
+    "affected_component",
+}
 
 TOKEN_STOPWORDS = {
     "the",
@@ -111,7 +147,12 @@ def default_checks() -> dict[str, bool]:
         "final_intent_objective_nonempty": False,
         "must_satisfy_nonempty": False,
         "dialogue_turn_count_valid": False,
-        "first_turn_vague": False,
+        "first_turn_initial_imperfect_report": False,
+        "initial_report_not_oracle": False,
+        "noisy_refinement_present": False,
+        "unresolved_wrong_claims_absent": False,
+        "no_old_progressive_disclosure": False,
+        "final_active_intent_consistency": False,
         "has_revision_operation": False,
         "introduced_units_valid": False,
         "compact_dialogue_introduced_units_present": False,
@@ -120,6 +161,7 @@ def default_checks() -> dict[str, bool]:
         "non_goal_not_in_must_satisfy": False,
         "evaluation_modes_complete": False,
         "localization_checkpoint_ready": False,
+        "keep_localization_metrics": False,
         "oracle_complete": False,
         "agent_view_no_gold_or_leakage": False,
         "template_dialogue_specific": False,
@@ -306,10 +348,10 @@ def evaluate_v2_quality(
 
     dialogue = compact.get("dialogue") if isinstance(compact.get("dialogue"), dict) else {}
     turns = dialogue.get("turns") if isinstance(dialogue.get("turns"), list) else []
-    if 4 <= len(turns) <= 6:
+    if 3 <= len(turns) <= 6:
         checks["dialogue_turn_count_valid"] = True
     else:
-        hard.append("dialogue.turns must contain 4-6 turns")
+        hard.append("dialogue.turns must contain 3-6 turns")
 
     operations: set[str] = set()
     user_surface: list[str] = []
@@ -320,45 +362,75 @@ def evaluate_v2_quality(
     compact_revision_bound_ok = False
     confirm_ok = True
     final_issue_for_confirm = ""
+    first_turn_ok = False
+    initial_not_oracle_ok = False
+    no_old_pattern_ok = True
+    final_active_consistency_ok = True
+    wrong_turns: list[tuple[int, str]] = []
+    resolved_wrong_turns: set[str] = set()
+    unresolved_wrong_claims = 0
     for index, turn in enumerate(turns):
         if not isinstance(turn, dict):
             hard.append(f"dialogue.turns[{index}] must be an object")
             continue
         operation = str(turn.get("operation") or "")
         operations.add(operation)
+        if operation in OLD_PROGRESSIVE_OPERATIONS:
+            no_old_pattern_ok = False
+            hard.append(f"dialogue.turns[{index}].operation uses deprecated progressive operation: {operation}")
         if operation not in ALLOWED_DIALOGUE_OPERATIONS:
             hard.append(f"dialogue.turns[{index}].operation is invalid: {operation}")
         utterance = str(turn.get("user_utterance") or "")
         user_surface.append(utterance)
+        introduced_raw = turn.get("introduced_units")
+        introduced_ids = _str_list(introduced_raw) if isinstance(introduced_raw, list) else []
         if index == 0:
-            if (
-                len(utterance) <= 90
-                and not re.search(r"\b(expected|root cause|fix|patch|implementation|should|incorrectly)\b", utterance, re.IGNORECASE)
-                and not GENERIC_T1_RE.search(utterance)
-                and not SNAKE_CASE_IDENTIFIER_RE.search(utterance)
-            ):
-                checks["first_turn_vague"] = True
+            t1_types = {str(unit_by_id.get(unit_id, {}).get("type") or "") for unit_id in introduced_ids}
+            first_turn_ok = (
+                operation == "initial_imperfect_report"
+                and 3 <= len(introduced_ids) <= 7
+                and len(t1_types & CORE_INITIAL_FACT_TYPES) >= 2
+                and 120 <= len(utterance) <= 900
+                and not BENCHMARK_METADATA_RE.search(utterance)
+                and not IMPLEMENTATION_HINT_RE.search(utterance)
+            )
+            if not first_turn_ok:
+                hard.append("T1 must be initial_imperfect_report with 3-7 units, at least two core fact types, and 120-900 chars")
+            oracle_must = _str_list((compact.get("oracle") if isinstance(compact.get("oracle"), dict) else {}).get("must_satisfy"))
+            exact_oracle_cover = bool(oracle_must) and all(_contains_item_text(utterance, item) for item in oracle_must)
+            objective = str(final_intent.get("objective") or "")
+            objective_repeat = bool(objective) and _normalized_text(objective) == _normalized_text(utterance)
+            all_units_revealed = bool(exposed_units) and len(set(introduced_ids)) >= len(exposed_units)
+            if not exact_oracle_cover and not objective_repeat and not all_units_revealed:
+                initial_not_oracle_ok = True
             else:
-                hard.append("T1 must be <= 90 chars, non-generic, and avoid complete benchmark-style issue details")
+                hard.append("T1 must not equal the final intent, reveal every user-facing unit, or cover all oracle checks")
+            if len(utterance) < 120 or operation != "initial_imperfect_report":
+                no_old_pattern_ok = False
         if TEMPLATE_ARTIFACT_RE.search(utterance):
             hard.append(f"dialogue.turns[{index}].user_utterance contains template/meta wording")
-        if operation == "confirm":
+        if operation == "confirm_final_active_intent":
             final_issue_for_confirm = str((compact.get("evaluation_modes") or {}).get("final_issue_prompt") or "")
-            if _confirm_repeats_final_intent(utterance, str(final_intent.get("objective") or ""), final_issue_for_confirm):
+            if _confirm_repeats_final_intent(utterance, str(final_intent.get("objective") or ""), final_issue_for_confirm) and len(utterance) > 260:
                 confirm_ok = False
                 hard.append(f"dialogue.turns[{index}].confirm repeats the full final intent instead of a concise confirmation")
         if BENCHMARK_METADATA_RE.search(utterance) or IMPLEMENTATION_HINT_RE.search(utterance):
             hard.append(f"dialogue.turns[{index}].user_utterance leaks benchmark metadata or implementation detail")
         if USER_RUNTIME_CLAIM_RE.search(utterance):
             hard.append(f"dialogue.turns[{index}].user_utterance makes unfair runtime/repo access claim")
-        introduced_raw = turn.get("introduced_units")
-        introduced_ids = _str_list(introduced_raw) if isinstance(introduced_raw, list) else []
         if not isinstance(introduced_raw, list):
             compact_introduced_ok = False
             hard.append(f"dialogue.turns[{index}].introduced_units must be a list in compact output")
         elif not introduced_ids:
-            compact_introduced_ok = False
-            hard.append(f"dialogue.turns[{index}].introduced_units must not be empty")
+            has_lifecycle_payload = bool(
+                _str_list(turn.get("revises_units"))
+                or _str_list(turn.get("deactivates_claims"))
+                or _str_list(turn.get("activates_claims"))
+                or operation == "confirm_final_active_intent"
+            )
+            if not has_lifecycle_payload:
+                compact_introduced_ok = False
+                hard.append(f"dialogue.turns[{index}].introduced_units must not be empty unless the turn revises, deactivates, activates, or confirms")
         for unit_id in introduced_ids:
             unit = unit_by_id.get(unit_id)
             if not unit:
@@ -370,19 +442,30 @@ def evaluate_v2_quality(
         if introduced_ids and not any(_token_overlap(utterance, unit_by_id.get(unit_id, {}).get("text", "")) > 0 for unit_id in introduced_ids):
             compact_introduced_alignment_ok = False
             hard.append(f"dialogue.turns[{index}] introduced_units do not match utterance content")
+        claim_status = str(turn.get("claim_status") or "")
+        if operation in WRONG_OR_SPECULATIVE_OPERATIONS or claim_status in {"speculative", "mistaken"}:
+            wrong_turns.append((index, str(turn.get("turn_id") or f"T{index + 1}")))
+        if index > 0 and operation in RESOLUTION_OPERATIONS:
+            for revised_turn in _str_list(turn.get("revises_turns")):
+                resolved_wrong_turns.add(revised_turn)
+            if _str_list(turn.get("deactivates_claims")) or _str_list(turn.get("activates_claims")):
+                for wrong_index, wrong_turn_id in wrong_turns:
+                    if wrong_index < index:
+                        resolved_wrong_turns.add(wrong_turn_id)
         if operation in REVISION_OPERATIONS:
             introduced_revision_ids = set(introduced_ids) & revision_unit_ids
+            revises_revision_ids = set(_str_list(turn.get("revises_units"))) & revision_unit_ids
+            revises_any_ids = set(_str_list(turn.get("revises_units"))) & unit_ids
             support_units = [unit_by_id.get(unit_id, {}) for unit_id in introduced_ids]
             if not has_revision_fact:
                 compact_revision_support_ok = False
-            elif not introduced_revision_ids:
+            elif not (introduced_ids or revises_any_ids):
                 compact_revision_support_ok = False
-                hard.append(f"dialogue.turns[{index}] revision operation is not bound to revision_support.revision_unit_ids")
-            elif not any(unit.get("type") in REVISION_SUPPORT_TYPES for unit in support_units):
-                compact_revision_support_ok = False
-                hard.append(f"dialogue.turns[{index}] revision operation lacks supporting revision fact unit")
-            else:
+                hard.append(f"dialogue.turns[{index}] revision operation is not bound to source fact units")
+            elif any(unit.get("type") in REVISION_SUPPORT_TYPES for unit in support_units) or revises_revision_ids:
                 compact_revision_bound_ok = True
+            else:
+                soft.append(f"dialogue.turns[{index}] revision operation is fact-bound but not tied to revision_support.revision_unit_ids")
         delta = turn.get("state_delta")
         if not isinstance(delta, dict):
             hard.append(f"dialogue.turns[{index}].state_delta must be an object")
@@ -390,6 +473,22 @@ def evaluate_v2_quality(
             soft.append(f"dialogue.turns[{index}].state_delta contains empty arrays; compact output should be sparse")
     if turns and compact_introduced_ok:
         checks["compact_dialogue_introduced_units_present"] = True
+    checks["first_turn_initial_imperfect_report"] = first_turn_ok
+    checks["initial_report_not_oracle"] = initial_not_oracle_ok
+    if operations & NON_MONOTONIC_OPERATIONS:
+        checks["noisy_refinement_present"] = True
+    else:
+        hard.append("dialogue must contain at least one noisy/non-monotonic refinement operation")
+    unresolved = [turn_id for _, turn_id in wrong_turns if turn_id not in resolved_wrong_turns]
+    unresolved_wrong_claims = len(unresolved)
+    if unresolved_wrong_claims == 0:
+        checks["unresolved_wrong_claims_absent"] = True
+    else:
+        hard.append(f"wrong or speculative claims are unresolved: {', '.join(unresolved)}")
+    if no_old_pattern_ok:
+        checks["no_old_progressive_disclosure"] = True
+    else:
+        hard.append("dialogue matches or uses an old progressive disclosure pattern")
 
     if operations & REVISION_OPERATIONS:
         checks["has_revision_operation"] = True
@@ -407,6 +506,9 @@ def evaluate_v2_quality(
             introduced_ok = False
             continue
         operation = str(turn.get("operation") or "")
+        if operation in OLD_PROGRESSIVE_OPERATIONS:
+            introduced_ok = False
+            hard.append(f"dialogue_plan.turns[{index}] uses deprecated progressive operation: {operation}")
         introduced_ids = _str_list(turn.get("introduced_units"))
         for unit_id in _str_list(turn.get("introduced_units")):
             if unit_id not in unit_ids:
@@ -420,15 +522,16 @@ def evaluate_v2_quality(
         if operation in REVISION_OPERATIONS:
             support_units = [unit_by_id.get(unit_id, {}) for unit_id in introduced_ids]
             introduced_revision_ids = set(introduced_ids) & revision_unit_ids
+            revises_revision_ids = set(_str_list(turn.get("revises_units"))) & revision_unit_ids
+            revises_any_ids = set(_str_list(turn.get("revises_units"))) & unit_ids
             if not has_revision_fact:
                 revision_support_ok = False
                 hard.append(f"dialogue_plan.turns[{index}] contains revision operation but revision_support.has_revision_fact=false")
-            if not introduced_revision_ids:
+            if not (introduced_ids or revises_any_ids):
                 revision_support_ok = False
-                hard.append(f"dialogue_plan.turns[{index}] revision operation is not bound to revision_support.revision_unit_ids")
-            elif not any(unit.get("type") in REVISION_SUPPORT_TYPES for unit in support_units):
-                revision_support_ok = False
-                hard.append(f"dialogue_plan.turns[{index}] revision operation lacks supporting revision fact unit")
+                hard.append(f"dialogue_plan.turns[{index}] revision operation is not bound to source fact units")
+            elif not any(unit.get("type") in REVISION_SUPPORT_TYPES for unit in support_units) and not revises_revision_ids:
+                soft.append(f"dialogue_plan.turns[{index}] revision operation is fact-bound but not tied to revision_support.revision_unit_ids")
             else:
                 revision_bound_ok = True
     if has_revision_fact and not (operations & REVISION_OPERATIONS):
@@ -468,10 +571,21 @@ def evaluate_v2_quality(
     ]
     must_surface = final_intent.get("must_satisfy")
     leaked_in_must = [text for text in inactive_texts if _contains_item_text(must_surface, text)]
+    deactivated_claims = []
+    for turn in turns:
+        if isinstance(turn, dict):
+            deactivated_claims.extend(_str_list(turn.get("deactivates_claims")))
+    leaked_deactivated = [text for text in deactivated_claims if _contains_item_text(must_surface, text)]
     if leaked_in_must:
         hard.append("non_goal/rejected/implementation unit appears in final_intent.must_satisfy")
+        final_active_consistency_ok = False
+    elif leaked_deactivated:
+        hard.append("deactivated/withdrawn claim appears in final_intent.must_satisfy")
+        final_active_consistency_ok = False
     else:
         checks["non_goal_not_in_must_satisfy"] = True
+    if final_active_consistency_ok and _str_list(final_intent.get("must_satisfy")):
+        checks["final_active_intent_consistency"] = True
 
     modes = compact.get("evaluation_modes") if isinstance(compact.get("evaluation_modes"), dict) else {}
     if REQUIRED_EVALUATION_KEYS.issubset(modes) and all(str(modes.get(key) or "").strip() or key == "multi_turn_cair_script" for key in REQUIRED_EVALUATION_KEYS):
@@ -487,12 +601,17 @@ def evaluate_v2_quality(
     localization = compact.get("localization_checkpoint") if isinstance(compact.get("localization_checkpoint"), dict) else {}
     prompt = str(localization.get("prompt") or "")
     gold = localization.get("gold") if isinstance(localization.get("gold"), dict) else {}
+    metrics = localization.get("metrics") if isinstance(localization.get("metrics"), dict) else {}
     gold_files = _str_list(gold.get("files"))
     gold_functions = _str_list(gold.get("functions"))
-    if prompt and isinstance(localization.get("expected_output_schema"), dict) and isinstance(localization.get("metrics"), dict) and gold_files:
+    if prompt and isinstance(localization.get("expected_output_schema"), dict) and isinstance(metrics, dict) and gold_files:
         checks["localization_checkpoint_ready"] = True
     else:
         soft.append("localization checkpoint is incomplete or lacks file gold")
+    if gold_files and "file_hit_at_k" in metrics and "function_hit_at_k" in metrics and isinstance(gold.get("files"), list) and isinstance(gold.get("functions"), list):
+        checks["keep_localization_metrics"] = True
+    else:
+        hard.append("localization_checkpoint must keep gold.files, gold.functions, file_hit_at_k, and function_hit_at_k")
     for gold_item in gold_files + gold_functions:
         if gold_item and gold_item in prompt:
             hard.append("localization prompt leaks evaluator-only gold")
@@ -568,6 +687,16 @@ def evaluate_v2_quality(
             "template_fallback_used": bool(template_used),
             "template_quality_status": "not_used" if not template_used else ("pass" if not template_issues else "fail"),
             "issues": template_issues,
+        },
+        "noisy_refinement": {
+            "old_progressive_disclosure_pattern": not no_old_pattern_ok,
+            "unresolved_wrong_claims": unresolved_wrong_claims,
+            "scenario_fit": "pass"
+            if checks["first_turn_initial_imperfect_report"]
+            and checks["noisy_refinement_present"]
+            and checks["no_old_progressive_disclosure"]
+            and checks["unresolved_wrong_claims_absent"]
+            else "fail",
         },
         "recommended_action": action,
     }

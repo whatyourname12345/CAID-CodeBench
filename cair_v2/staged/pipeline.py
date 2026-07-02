@@ -76,7 +76,7 @@ def _semantic_capsule(fact_extraction: dict[str, Any], intent_revision: dict[str
     }
 
 
-def _dialogue_plan(skeleton: dict[str, Any], realization: dict[str, Any]) -> dict[str, Any]:
+def _dialogue_plan(event_plan: dict[str, Any], realization: dict[str, Any]) -> dict[str, Any]:
     utterances = realization.get("utterances") if isinstance(realization.get("utterances"), list) else []
     utterance_by_id = {
         str(item.get("turn_id")): str(item.get("user_utterance") or "").strip()
@@ -84,22 +84,38 @@ def _dialogue_plan(skeleton: dict[str, Any], realization: dict[str, Any]) -> dic
         if isinstance(item, dict)
     }
     turns = []
-    for raw in (skeleton.get("turns") if isinstance(skeleton.get("turns"), list) else []):
+    passthrough_fields = [
+        "claim_status",
+        "revises_turns",
+        "revises_units",
+        "deactivates_claims",
+        "activates_claims",
+        "active_after_turn",
+        "inactive_after_turn",
+        "must_be_resolved_later",
+    ]
+    for raw in (event_plan.get("turns") if isinstance(event_plan.get("turns"), list) else []):
         if not isinstance(raw, dict):
             continue
-        turns.append(
-            {
-                "operation": str(raw.get("operation") or "").strip(),
-                "user_utterance": utterance_by_id.get(str(raw.get("turn_id")), ""),
-                "introduced_units": _str_list(raw.get("introduced_units")),
-            }
-        )
+        turn = {
+            "operation": str(raw.get("operation") or "").strip(),
+            "user_utterance": utterance_by_id.get(str(raw.get("turn_id")), ""),
+            "introduced_units": _str_list(raw.get("introduced_units")),
+        }
+        for field in passthrough_fields:
+            value = raw.get(field)
+            if isinstance(value, list):
+                turn[field] = _str_list(value)
+            elif value not in (None, ""):
+                turn[field] = value
+        turns.append(turn)
     return {"turns": turns}
 
 
-def _utterance_context(
+def _realization_context(
     *,
-    skeleton: dict[str, Any],
+    initial_report_plan: dict[str, Any],
+    event_plan: dict[str, Any],
     fact_extraction: dict[str, Any],
     intent_revision: dict[str, Any],
 ) -> dict[str, Any]:
@@ -109,7 +125,7 @@ def _utterance_context(
         if isinstance(unit, dict) and unit.get("unit_id")
     }
     turn_unit_facts = []
-    for raw in (skeleton.get("turns") if isinstance(skeleton.get("turns"), list) else []):
+    for raw in (event_plan.get("turns") if isinstance(event_plan.get("turns"), list) else []):
         if not isinstance(raw, dict):
             continue
         introduced = _str_list(raw.get("introduced_units"))
@@ -129,12 +145,12 @@ def _utterance_context(
             }
         )
     return {
-        "dialogue_skeleton": skeleton,
+        "initial_report_plan": initial_report_plan,
+        "noisy_revision_event_plan": event_plan,
         "turn_unit_facts": turn_unit_facts,
         "final_intent_summary": intent_revision.get("final_intent"),
         "forbidden_terms": [
             "patch",
-            "fix",
             "diff",
             "test",
             "tests",
@@ -145,6 +161,7 @@ def _utterance_context(
             "PASS_TO_PASS",
             "hidden test",
             "reference patch",
+            "implementation_hint",
         ],
     }
 
@@ -245,26 +262,87 @@ def run_staged_pipeline(
             semantic_capsule=capsule,
         )
 
-    skeleton_context = {
+    initial_context = {
         "fact_units": _exposed_fact_units(fact.data),
         "final_intent": intent.data.get("final_intent"),
         "revision_support": intent.data.get("revision_support"),
         "fact_extraction": fact.data,
         "intent_revision": intent.data,
     }
-    skeleton = runner.run_step("dialogue_skeleton", skeleton_context)
-    step_results["dialogue_skeleton"] = skeleton
-    if not skeleton.ok:
+    initial_plan = runner.run_step("initial_report_plan", initial_context)
+    step_results["initial_report_plan"] = initial_plan
+    if not initial_plan.ok:
         return _failed_result(
             status="step_failed",
-            failed_step="dialogue_skeleton",
+            failed_step="initial_report_plan",
             step_results=step_results,
-            errors=skeleton.errors,
+            errors=initial_plan.errors,
+            semantic_capsule=capsule,
+        )
+    if initial_plan.data.get("status") == "manual_review_required":
+        reason = str(initial_plan.data.get("reason") or "initial_report_plan requested manual review")
+        _write_intermediate_debug(
+            instance_dir,
+            {
+                "staged_status": "manual_review_required",
+                "review_stage": "initial_report_plan",
+                "manual_review_reason": reason,
+                "fact_extraction": fact.data,
+                "intent_revision": intent.data,
+                "initial_report_plan": initial_plan.data,
+            },
+        )
+        return _failed_result(
+            status="manual_review_required",
+            failed_step="initial_report_plan",
+            step_results=step_results,
+            errors=[reason],
             semantic_capsule=capsule,
         )
 
-    utterance_context = _utterance_context(
-        skeleton=skeleton.data,
+    event_context = {
+        "fact_units": _exposed_fact_units(fact.data),
+        "final_intent": intent.data.get("final_intent"),
+        "revision_support": intent.data.get("revision_support"),
+        "initial_report_plan": initial_plan.data,
+        "fact_extraction": fact.data,
+        "intent_revision": intent.data,
+    }
+    event_plan = runner.run_step("noisy_revision_event_plan", event_context)
+    step_results["noisy_revision_event_plan"] = event_plan
+    if not event_plan.ok:
+        return _failed_result(
+            status="step_failed",
+            failed_step="noisy_revision_event_plan",
+            step_results=step_results,
+            errors=event_plan.errors,
+            semantic_capsule=capsule,
+        )
+    if event_plan.data.get("status") == "manual_review_required":
+        reason = str(event_plan.data.get("reason") or "noisy_revision_event_plan requested manual review")
+        _write_intermediate_debug(
+            instance_dir,
+            {
+                "staged_status": "manual_review_required",
+                "review_stage": "noisy_revision_event_plan",
+                "manual_review_reason": reason,
+                "fact_extraction": fact.data,
+                "intent_revision": intent.data,
+                "initial_report_plan": initial_plan.data,
+                "noisy_revision_event_plan": event_plan.data,
+            },
+        )
+        return _failed_result(
+            status="manual_review_required",
+            failed_step="noisy_revision_event_plan",
+            step_results=step_results,
+            errors=[reason],
+            semantic_capsule=capsule,
+        )
+
+    utterance_context = _realization_context(
+        initial_report_plan=initial_plan.data,
+        event_plan=event_plan.data,
         fact_extraction=fact.data,
         intent_revision=intent.data,
     )
@@ -274,18 +352,18 @@ def run_staged_pipeline(
             "intent_revision": intent.data,
         }
     )
-    utterance = runner.run_step("utterance_realization", utterance_context)
-    step_results["utterance_realization"] = utterance
+    utterance = runner.run_step("realistic_utterance_realization", utterance_context)
+    step_results["realistic_utterance_realization"] = utterance
     if not utterance.ok:
         return _failed_result(
             status="step_failed",
-            failed_step="utterance_realization",
+            failed_step="realistic_utterance_realization",
             step_results=step_results,
             errors=utterance.errors,
             semantic_capsule=capsule,
         )
 
-    plan = _dialogue_plan(skeleton.data, utterance.data)
+    plan = _dialogue_plan(event_plan.data, utterance.data)
     sanitized = sanitize_dialogue_plan(plan)
     plan = sanitized.data if isinstance(sanitized.data, dict) else plan
     write_dialogue_plan(instance_dir, plan, source="llm_staged")
@@ -300,8 +378,9 @@ def run_staged_pipeline(
         "localization_summary": _localization_summary(instance_dir),
         "fact_extraction": fact.data,
         "intent_revision": intent.data,
-        "dialogue_skeleton": skeleton.data,
-        "utterance_realization": utterance.data,
+        "initial_report_plan": initial_plan.data,
+        "noisy_revision_event_plan": event_plan.data,
+        "realistic_utterance_realization": utterance.data,
     }
     review = runner.run_step("semantic_reviewer", review_context)
     step_results["semantic_reviewer"] = review
@@ -324,8 +403,9 @@ def run_staged_pipeline(
             "staged_status": status,
             "fact_extraction": fact.data,
             "intent_revision": intent.data,
-            "dialogue_skeleton": skeleton.data,
-            "utterance_realization": utterance.data,
+            "initial_report_plan": initial_plan.data,
+            "noisy_revision_event_plan": event_plan.data,
+            "realistic_utterance_realization": utterance.data,
             "semantic_review": review.data,
         },
     )

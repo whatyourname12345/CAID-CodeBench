@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--include-rejected", action="store_true")
     parser.add_argument("--optional-reviewer", action="store_true", help="Reserved for future v2 reviewer pass; default v2 skips reviewer.")
-    parser.add_argument("--mode", choices=["staged-llm", "minimal-robust"], default="minimal-robust")
+    parser.add_argument("--mode", choices=["staged-llm", "minimal-robust"], default="staged-llm")
     parser.add_argument("--dialogue-strategy", choices=["monolithic", "staged"], default="monolithic")
     return parser.parse_args()
 
@@ -67,6 +67,8 @@ def main() -> None:
     )
     if args.mode == "staged-llm" and args.dialogue_strategy != "monolithic":
         print("--dialogue-strategy is ignored in --mode staged-llm; staged dialogue is intrinsic to the pipeline.")
+    if args.mode == "minimal-robust":
+        print("--mode minimal-robust is deprecated; use --mode staged-llm for v2_noisy_refinement construction.")
     try:
         state = run_batch_v2(options, config)
     except MissingAPIKeyError as exc:

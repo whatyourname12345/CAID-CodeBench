@@ -67,24 +67,30 @@ llm_params:
     response_format:
       type: json_object
     compact_prompt: cair_v2/prompts/dialogue_plan_compact.md
-  dialogue_skeleton:
+  initial_report_plan:
     temperature: 0.0
-    max_tokens: 1500
+    max_tokens: 1800
     timeout: 90
     thinking:
       type: disabled
     response_format:
       type: json_object
-    compact_prompt: cair_v2/prompts/dialogue_skeleton_staged_compact.md
-  utterance_realization:
-    temperature: 0.5
-    max_tokens: 1500
+  noisy_revision_event_plan:
+    temperature: 0.0
+    max_tokens: 2600
     timeout: 90
     thinking:
       type: disabled
     response_format:
       type: json_object
-    compact_prompt: cair_v2/prompts/utterance_realization_staged_compact.md
+  realistic_utterance_realization:
+    temperature: 0.4
+    max_tokens: 2400
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
   semantic_reviewer:
     temperature: 0.1
     max_tokens: 3000

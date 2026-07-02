@@ -384,8 +384,20 @@ def sanitize_dialogue_plan(plan: dict[str, Any]) -> SanitizerResult:
             "operation": str(raw.get("operation") or "").strip(),
             "user_utterance": str(raw.get("user_utterance") or "").strip(),
             "introduced_units": _dedupe_strings(raw.get("introduced_units")),
-            "intent_delta": str(raw.get("intent_delta") or "").strip(),
         }
+        for field in ["claim_status", "must_be_resolved_later"]:
+            if field in raw and raw.get(field) not in (None, ""):
+                turn[field] = raw.get(field) if isinstance(raw.get(field), bool) else str(raw.get(field)).strip()
+        for field in [
+            "revises_turns",
+            "revises_units",
+            "deactivates_claims",
+            "activates_claims",
+            "active_after_turn",
+            "inactive_after_turn",
+        ]:
+            if field in raw:
+                turn[field] = _dedupe_strings(raw.get(field))
         clean_turns.append(turn)
     data["turns"] = clean_turns
     if contains_benchmark_metadata(data):

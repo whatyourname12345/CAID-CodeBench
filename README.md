@@ -48,25 +48,29 @@ default to full SWE-bench conversion. Final CAIR data should come only from a
 CAIR suitability-screened subset with enough user-visible functional facts,
 real intent-revision potential, and localization gold.
 
-The recommended research path is `--mode staged-llm`, a five-stage JSON
-pipeline:
+The recommended research path is `--mode staged-llm`, now emitted as
+`pipeline_version: v2_noisy_refinement`. It uses a realistic noisy issue
+refinement JSON pipeline:
 
 1. `fact_extraction`
 2. `intent_revision`
-3. `dialogue_skeleton`
-4. `utterance_realization`
-5. `semantic_reviewer`
-6. deterministic local compilation
-7. local sanitizer and `quality_gate_v2`
-8. localization checkpoint gold extraction
-9. agent/evaluator-view export
+3. `initial_report_plan`
+4. `noisy_revision_event_plan`
+5. `realistic_utterance_realization`
+6. `semantic_reviewer`
+7. deterministic local compilation
+8. local sanitizer and `quality_gate_v2`
+9. localization checkpoint gold extraction
+10. agent/evaluator-view export
 
-The older `--mode minimal-robust` path is retained for compatibility. It still
-uses `semantic_capsule` and `dialogue_plan` internally, but is no longer the
-preferred construction path.
+The older `--mode minimal-robust` path is deprecated and retained only for
+compatibility. It still uses `semantic_capsule` and `dialogue_plan` internally,
+but it is no longer the preferred construction path and should not be used for
+new staged-LLM data generation.
 
-The conversion target is intent-revision sharding, not ordinary sentence
-splitting. A compact instance keeps `semantic_capsule.fact_units`,
+The conversion target is realistic noisy issue refinement, not progressive
+disclosure or ordinary sentence splitting. A compact instance keeps
+`semantic_capsule.fact_units`,
 `semantic_capsule.revision_support`, `dialogue.turns[].introduced_units`,
 `final_intent`, `localization_checkpoint`, `oracle`, and `metadata`.
 
@@ -125,6 +129,6 @@ Release artifacts should be the compact JSONL view plus construction
 their `.build/` contents are debug/private material and should not be treated as
 agent-facing data.
 
-See `docs/cair_pipeline_v2_minimal_robust.md` for the construction contract,
-legacy compatibility path, quality gate, template fallback, and localization
-checkpoint details.
+The current construction path is the staged-LLM pipeline under `cair_v2/staged/`
+and `cair_v2/batch/`. `minimal-robust` remains as a compatibility mode, while
+`staged-llm` is the recommended research path.

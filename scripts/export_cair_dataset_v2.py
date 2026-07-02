@@ -93,7 +93,7 @@ def export_v2(
             handle.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     manifest = {
-        "format": "cair_batch_v2_minimal_robust",
+        "format": "cair_batch_v2_noisy_refinement",
         "input_dir": str(input_dir),
         "output_jsonl": str(output_jsonl),
         "count": len(exported),

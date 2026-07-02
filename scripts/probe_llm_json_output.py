@@ -29,14 +29,14 @@ TASKS = {
         "system": "Return strict JSON only. No markdown.",
         "user": 'Return exactly this JSON object: {"ok": true}',
     },
-    "skeleton_json": {
+    "event_plan_json": {
         "system": "Return strict JSON only. No markdown. The word json is required.",
         "user": (
             'Return this JSON shape with exactly 4 turns: '
-            '{"turns":[{"turn_id":"T1","operation":"reveal_vague_goal","introduced_units":["U1"]},'
-            '{"turn_id":"T2","operation":"add_information","introduced_units":["U2"]},'
-            '{"turn_id":"T3","operation":"correct","introduced_units":["U3"]},'
-            '{"turn_id":"T4","operation":"confirm","introduced_units":["U4"]}]}'
+            '{"turns":[{"turn_id":"T1","operation":"initial_imperfect_report","introduced_units":["U1","U2","U3"],"claim_status":"partially_active_with_uncertainty"},'
+            '{"turn_id":"T2","operation":"speculative_hypothesis","introduced_units":["U4"],"claim_status":"speculative"},'
+            '{"turn_id":"T3","operation":"correct_previous_claim","introduced_units":["U5"],"revises_turns":["T2"],"claim_status":"correction"},'
+            '{"turn_id":"T4","operation":"confirm_final_active_intent","introduced_units":["U6"],"claim_status":"confirmation"}]}'
         ),
     },
     "utterance_json": {
