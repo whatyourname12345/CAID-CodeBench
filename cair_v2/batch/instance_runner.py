@@ -9,6 +9,13 @@ from typing import Any
 
 from cair_v2.batch.batch_state import BatchState
 from cair_v2.batch.fallback_policy import should_use_template_fallback
+from cair_v2.batch.status_semantics import (
+    build_attempt_record,
+    build_normalized_fields,
+    decide_retry,
+    normalize_status,
+    resolve_filter_reason,
+)
 from cair_v2.batch.pipeline_steps import deepseek_client_factory, model_config_summary, run_staged_instance_pipeline, staged_step_configs
 from cair_v2.batch.quality_gate_v2 import evaluate_v2_instance_dir, evaluate_v2_quality
 from cair_v2.batch.state_recorder import record_staged_result
@@ -599,20 +606,21 @@ def _write_staged_manual_review_report(
     state.save()
 
 
-def run_one_instance_staged_v2(
+def _run_staged_attempt(
     *,
     record: dict[str, Any],
     output_dir: Path,
     state: BatchState,
     options: BatchV2Options,
+    force: bool,
 ) -> None:
     instance_id = str(record.get("instance_id"))
     repo = str(record.get("repo") or "")
-    instance_dir = create_or_load_instance_v2(record, output_dir, force=options.force)
+    instance_dir = create_or_load_instance_v2(record, output_dir, force=force)
     state.ensure_instance(instance_id, repo=repo, path=rel(instance_dir))
     state.update_instance(instance_id, dialogue_strategy="staged", mode="staged-llm")
     item = state.ensure_instance(instance_id)
-    if options.resume and item.get("status") in {"accepted", "accepted_with_template_dialogue"} and not options.force:
+    if options.resume and item.get("status") in {"accepted", "accepted_with_template_dialogue"} and not force:
         quality = evaluate_v2_instance_dir(instance_dir)
         state.update_instance(
             instance_id,
@@ -809,6 +817,174 @@ def run_one_instance_staged_v2(
         suggested_fix="Inspect staged .build/*.json; do not force a revision without source fact support.",
     )
     state.save()
+
+
+def _read_quality_report(instance_dir: Path) -> dict[str, Any]:
+    path = instance_dir / "quality_report.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _apply_normalized_outcome(
+    *,
+    instance_dir: Path,
+    instance_id: str,
+    state: BatchState,
+    fields: dict[str, Any],
+    attempts: list[dict[str, Any]],
+    accepted_after_retry: bool,
+    previous_normalized_status: str | None,
+) -> None:
+    """Persist normalized-status fields to state, quality_report, and metadata."""
+    normalized = str(fields.get("normalized_status") or "")
+    accepted_via = "retry" if accepted_after_retry else ("initial" if normalized == "accepted" else None)
+    state_updates: dict[str, Any] = dict(fields)
+    state_updates["normalized_attempts"] = attempts
+    state_updates["normalized_attempt_count"] = len(attempts)
+    state_updates["accepted_after_retry"] = accepted_after_retry
+    if normalized == "accepted":
+        state_updates["accepted_via"] = accepted_via
+    if accepted_after_retry:
+        state_updates["status_changed_by_retry"] = True
+        state_updates["previous_normalized_status"] = previous_normalized_status or "auto_filtered"
+        state_updates["final_normalized_status"] = "accepted"
+    state.update_instance(instance_id, **state_updates)
+    state.save()
+
+    quality_report = _read_quality_report(instance_dir)
+    if quality_report:
+        quality_report.update(fields)
+        quality_report["attempts"] = attempts
+        quality_report["accepted_after_retry"] = accepted_after_retry
+        if accepted_after_retry:
+            quality_report["status_changed_by_retry"] = True
+            quality_report["previous_normalized_status"] = previous_normalized_status or "auto_filtered"
+            quality_report["final_normalized_status"] = "accepted"
+        write_json(instance_dir / "quality_report.json", quality_report)
+
+    instance_path = instance_dir / "cair_instance.json"
+    if instance_path.exists():
+        try:
+            compact = json.loads(instance_path.read_text(encoding="utf-8"))
+        except Exception:
+            compact = None
+        if isinstance(compact, dict):
+            metadata = compact.setdefault("metadata", {})
+            metadata["normalized_status"] = fields.get("normalized_status")
+            metadata["review_mode"] = fields.get("review_mode")
+            metadata["human_review_expected"] = fields.get("human_review_expected")
+            if "filter_reason" in fields:
+                metadata["filter_reason"] = fields.get("filter_reason")
+            if normalized == "accepted":
+                metadata["accepted_via"] = accepted_via
+                metadata["accepted_after_retry"] = accepted_after_retry
+            write_json(instance_path, compact)
+
+
+def run_one_instance_staged_v2(
+    *,
+    record: dict[str, Any],
+    output_dir: Path,
+    state: BatchState,
+    options: BatchV2Options,
+) -> None:
+    """Run the staged pipeline with a bounded, typed retry policy.
+
+    Attempt 1 always runs. If the terminal outcome is a retry-eligible
+    auto_filter subclass or a transient step_failed, exactly one additional
+    full-chain re-execution is attempted (``max_full_chain_attempts == 2``).
+    accepted / rejected / non-transient step_failed / non-retryable auto_filter
+    are never retried.
+    """
+    instance_id = str(record.get("instance_id"))
+    attempts: list[dict[str, Any]] = []
+    previous_normalized_status: str | None = None
+    accepted_after_retry = False
+    max_attempts = 2
+
+    for attempt_id in range(1, max_attempts + 1):
+        item_before = state.ensure_instance(instance_id)
+        api_before = int(item_before.get("api_calls", 0) or 0)
+        force = options.force if attempt_id == 1 else True
+        _run_staged_attempt(
+            record=record,
+            output_dir=output_dir,
+            state=state,
+            options=options,
+            force=force,
+        )
+        item = state.ensure_instance(instance_id)
+        status = str(item.get("status") or "")
+
+        # Dry-run / no-api attempts do not produce a terminal semantic outcome.
+        if options.dry_run or options.no_api or status in {"pending", "running"}:
+            return
+
+        instance_dir = output_dir / instance_id
+        quality_report = _read_quality_report(instance_dir)
+        normalized = normalize_status(status)
+        filter_reason = resolve_filter_reason(item, quality_report) if normalized == "auto_filtered" else None
+        retry_plan = decide_retry(normalized, filter_reason or "", item)
+
+        api_after = int(item.get("api_calls", 0) or 0)
+        attempts.append(
+            build_attempt_record(
+                attempt_id=attempt_id,
+                status=status,
+                item=item,
+                quality_report=quality_report,
+                filter_reason=filter_reason,
+                api_calls=max(0, api_after - api_before),
+            )
+        )
+
+        budget_ok = _api_budget_available(state, options)
+        will_retry = (
+            retry_plan.eligible
+            and attempt_id < retry_plan.max_full_chain_attempts
+            and budget_ok
+            and normalized in {"auto_filtered", "step_failed"}
+        )
+        if will_retry:
+            previous_normalized_status = normalized
+            append_retry_log(
+                instance_dir,
+                {
+                    "step": "full_chain_retry",
+                    "event": "retry",
+                    "attempt_id": attempt_id,
+                    "from_normalized_status": normalized,
+                    "filter_reason": filter_reason,
+                    "retry_policy": retry_plan.policy,
+                    "retry_reason": retry_plan.reason,
+                },
+            )
+            continue
+
+        if attempt_id > 1 and normalized == "accepted":
+            accepted_after_retry = True
+
+        filter_stage = item.get("failed_stage") or item.get("review_stage") or item.get("current_step")
+        fields = build_normalized_fields(
+            status=status,
+            filter_reason=filter_reason,
+            filter_stage=filter_stage,
+            retry_plan=retry_plan,
+        )
+        _apply_normalized_outcome(
+            instance_dir=instance_dir,
+            instance_id=instance_id,
+            state=state,
+            fields=fields,
+            attempts=attempts,
+            accepted_after_retry=accepted_after_retry,
+            previous_normalized_status=previous_normalized_status,
+        )
+        return
 
 
 def run_one_instance_v2(

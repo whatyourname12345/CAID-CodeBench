@@ -75,14 +75,25 @@ def main() -> None:
         print(str(exc))
         raise SystemExit(2) from exc
     counts: dict[str, int] = {}
+    normalized_counts: dict[str, int] = {}
+    accepted_after_retry = 0
     for item in state.data.get("instances", {}).values():
         status = str(item.get("status") or "unknown")
         counts[status] = counts.get(status, 0) + 1
+        normalized = str(item.get("normalized_status") or "unknown")
+        normalized_counts[normalized] = normalized_counts.get(normalized, 0) + 1
+        if item.get("accepted_after_retry"):
+            accepted_after_retry += 1
     print(f"batch_id: {state.data.get('batch_id')}")
     print(f"pipeline_version: {state.data.get('pipeline_version')}")
     print(f"api_calls: {state.data.get('api_calls')}")
+    print("--- status (legacy) ---")
     for status, count in sorted(counts.items()):
         print(f"{status}: {count}")
+    print("--- normalized_status ---")
+    for status, count in sorted(normalized_counts.items()):
+        print(f"{status}: {count}")
+    print(f"accepted_after_retry: {accepted_after_retry}")
 
 
 if __name__ == "__main__":
