@@ -1,5 +1,12 @@
 # CAIR-CodeBench Framework
 
+This is a legacy framework note. The current CAIR v2 data-construction path is
+the staged-LLM pipeline under `cair_v2/staged/` and `cair_v2/batch/`. In v2,
+SWE-bench is raw corpus only; final CAIR data must come from
+suitability-screened subsets, and agent-view exports must not expose oracle
+fields, localization gold, reference patches, hidden tests, or SWE-bench
+test-list metadata.
+
 CAIR-CodeBench keeps SWE-bench's executable patch validation as the final correctness signal and adds an interaction layer around it.
 
 ## Motivation
@@ -17,15 +24,19 @@ CAIR-CodeBench combines these ideas:
 
 ## Artifacts
 
-Each task has:
+Historically, each prototype task had:
 
-- `datasets/tasks.jsonl`: public task index.
-- `datasets/dialogues/{task_id}.json`: hidden dialogue scenario and user persona.
-- `datasets/gold_intent_states/{task_id}.json`: gold structured intent.
-- `datasets/evaluation_specs/{task_id}.json`: final SWE executable evaluation spec.
+- `tasks.jsonl`: public task index.
+- `dialogues/{task_id}.json`: hidden dialogue scenario and user persona.
+- `gold_intent_states/{task_id}.json`: gold structured intent.
+- `evaluation_specs/{task_id}.json`: final SWE executable evaluation spec.
 - `results/raw_traces/{task_id}.jsonl`: agent/user/tool events.
 - `results/patches/{task_id}.patch`: final model patch.
 - `results/scores/{task_id}.json`: final and intermediate scores.
+
+These prototype artifacts are not part of the current CAIR v2 data-construction
+contract. Current CAIR v2 construction and release artifacts live under
+`data/candidates/`, `data/runs/`, `data/instances/`, and `data/release/`.
 
 ## Metrics
 

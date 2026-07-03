@@ -1,0 +1,28 @@
+defaults:
+  limit: 1
+  max_api_calls: 30
+  client_max_retries: 1
+  client_timeout: 90
+  sleep_between_instances: 0.0
+
+candidate_selection:
+  preserve_input_order: true
+  golden_first: false
+  golden_instance_ids:
+    - django__django-14011
+  include_rejected: false
+  skip_manual_labels:
+    - REJECT_OR_DOWNRANK
+
+quality_gate:
+  require_semantic_suitability: true
+  require_revision_support: true
+  require_localization_file_gold: true
+  allow_template_dialogue: true
+  optional_reviewer_enabled: false
+
+release:
+  default_name: cair_batch_v2
+  default_view: agent
+  include_patch_by_default: false
+  include_debug_by_default: false

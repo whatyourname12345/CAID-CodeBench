@@ -17,14 +17,14 @@ from harness.swe_dataset import load_swe_instances, write_jsonl
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build CAIR dialogue tasks from SWE-bench.")
-    parser.add_argument("--swe-jsonl", default="datasets/swe-bench/dev.jsonl", help="Input SWE-bench JSONL.")
+    parser.add_argument("--swe-jsonl", default="data/raw/swebench_full.jsonl", help="Input SWE-bench JSONL.")
     parser.add_argument("--limit", type=int, help="Optional number of tasks to build.")
-    parser.add_argument("--tasks-out", default="datasets/tasks.jsonl", help="Output CAIR task JSONL.")
-    parser.add_argument("--dialogues-dir", default="datasets/dialogues", help="Output dialogue scenario directory.")
-    parser.add_argument("--gold-dir", default="datasets/gold_intent_states", help="Output gold intent directory.")
+    parser.add_argument("--tasks-out", required=True, help="Output CAIR task JSONL.")
+    parser.add_argument("--dialogues-dir", required=True, help="Output dialogue scenario directory.")
+    parser.add_argument("--gold-dir", required=True, help="Output gold intent directory.")
     parser.add_argument(
         "--evaluation-dir",
-        default="datasets/evaluation_specs",
+        required=True,
         help="Output SWE executable evaluation spec directory.",
     )
     args = parser.parse_args()

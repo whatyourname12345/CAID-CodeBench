@@ -1,0 +1,123 @@
+models:
+  flash: deepseek-v4-flash
+  pro: deepseek-v4-pro
+
+routing:
+  fact_extraction:
+    primary: flash
+  intent_revision:
+    primary: pro
+  semantic_capsule:
+    primary: flash
+    fallback: pro
+  dialogue_plan:
+    primary: pro
+    fallback: flash
+  dialogue_template:
+    primary: local
+  semantic_reviewer:
+    primary: pro
+  deterministic_compiler:
+    primary: local
+  sanitizer:
+    primary: local
+  localization_gold:
+    primary: local
+  quality_gate:
+    primary: local
+  export:
+    primary: local
+
+optional_reviewer:
+  enabled_by_default: false
+  model: pro
+
+llm_params:
+  fact_extraction:
+    temperature: 0.1
+    max_tokens: 3000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+  intent_revision:
+    temperature: 0.1
+    max_tokens: 3000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+  semantic_capsule:
+    temperature: 0.0
+    max_tokens: 3000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+    compact_prompt: cair_v2/prompts/semantic_capsule_compact.md
+  dialogue_plan:
+    temperature: 0.0
+    max_tokens: 3000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+    compact_prompt: cair_v2/prompts/dialogue_plan_compact.md
+  initial_report_plan:
+    temperature: 0.0
+    max_tokens: 1800
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+  noisy_revision_event_plan:
+    temperature: 0.0
+    max_tokens: 2600
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+  realistic_utterance_realization:
+    temperature: 0.4
+    max_tokens: 2400
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+  semantic_reviewer:
+    temperature: 0.1
+    max_tokens: 3000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+  json_repair:
+    temperature: 0.0
+    max_tokens: 1000
+    timeout: 90
+    thinking:
+      type: disabled
+    response_format:
+      type: json_object
+
+reliability:
+  raw_output_dir: .build/raw_llm_outputs
+  same_model_retries_on_empty: 1
+  compact_retries_on_empty: 1
+  fallback_retries_on_empty: 1
+  json_repair_prompt: "只修复 JSON 语法，不改变含义，不新增内容。"
+
+escalation:
+  enabled: true
+  semantic_capsule_flash_to_pro: true
+  dialogue_plan_pro_to_flash_on_empty_or_parse_failure: true
+  flash_to_pro_on_parse_failure: false
+  max_escalations_per_instance: 2

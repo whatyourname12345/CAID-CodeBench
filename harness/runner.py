@@ -5,7 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from harness.metrics import compute_cair_report, compute_score
 
@@ -44,7 +49,7 @@ def run_task(task: dict[str, Any]) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run CAIR-CodeBench tasks.")
-    parser.add_argument("--tasks", default="datasets/tasks.jsonl", help="Path to task JSONL file.")
+    parser.add_argument("--tasks", required=True, help="Path to task JSONL file.")
     parser.add_argument("--output", default="results/scores/scores.json", help="Score output path.")
     args = parser.parse_args()
 
